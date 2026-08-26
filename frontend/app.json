@@ -1,0 +1,63 @@
+{
+  "expo": {
+    "name": "Despensa",
+    "slug": "frontend",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "frontend",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.emergent.monthlyshop.aq7qrl",
+      "usesAppleSignIn": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Escanear facturas para agregar productos",
+        "NSPhotoLibraryUsageDescription": "Elegir foto de factura desde tu galería"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#059669"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.emergent.monthlyshop.aq7qrl",
+      "permissions": ["android.permission.CAMERA", "android.permission.READ_MEDIA_IMAGES"]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-image.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#059669"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Permitir escanear facturas con la cámara"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Permitir elegir fotos de facturas"
+        }
+      ],
+      "expo-apple-authentication"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

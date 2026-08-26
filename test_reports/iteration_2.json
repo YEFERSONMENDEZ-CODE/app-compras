@@ -1,0 +1,35 @@
+{
+  "summary": "Regression + fix verification testing complete. All 16 backend pytest cases PASS (14 existing + 2 new for purchase total recalculation bug fix). Frontend boot fix verified via web preview: (1) with NO token, login screen renders in 0.8s with 'Despensa' title and google-login-button testID -- well under 5s cap. (2) With despensa_token='test-token-abc123' in localStorage, dashboard renders in 0.5s with all 4 tabs (Inicio/Mercados/Reportes/Ajustes) and 'Hola,' greeting -- well under 8s cap. No infinite splash observed. (3) Edit flow works: tapping [data-testid='purchase-row-<id>'] navigates to /add-purchase?purchaseId=<id>, header 'Editar compra' visible, delete-purchase-btn testID present. Bug fix verified: POST /api/purchases with quantity=3, price=10000 returns total=30000 (was 10000 before fix); PUT with quantity=5 correctly recomputes total=50000; multi-item totals sum correctly. Backend regression: all previous endpoints (currencies, auth session, markets CRUD, purchases CRUD, monthly report, auth/me, receipt/scan) still 200 with Bearer test-token-abc123. Deprecated packages detected: none. React Native web deprecation warnings persist (shadow*, pointerEvents) -- non-blocking, already reported in iteration_1.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "global (web preview)", "issue": "React Native Web deprecation warnings still emitted in console: 'shadow*' style props (use boxShadow) and 'props.pointerEvents is deprecated' (use style.pointerEvents). Non-blocking; same as iteration_1."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_despensa_api.py",
+    "/app/backend/tests/test_purchase_total.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: address the two RN Web deprecation warnings (shadow* -> boxShadow; pointerEvents prop -> style.pointerEvents).",
+    "OPTIONAL (from iteration_1, still open): simplify the dead-code ternary in server.py total = sum(price * (quantity if quantity>0 else 1)) -- fine functionally but misleading."
+  ],
+  "critical_code_review_comments": [
+    "auth.tsx checkExisting() will clear the stored token whenever /api/auth/me throws OR times out (line 78). This is correct for expired sessions but means a single transient network blip on cold boot silently logs the user out. Consider distinguishing 401 (expired) from other errors (network/timeout) before calling clearToken().",
+    "Boot fix in _layout.tsx (4s icon-font hard cap) and auth.tsx (1.5s Linking, 2s getToken, 6s /auth/me) is correctly implemented -- confirmed by network + timing observations."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_purchase_total.py (new - regression tests for POST/PUT total recalculation bug fix)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% for tested flows (boot-no-token, boot-with-token, edit-flow)"},
+  "seed_data_creation": "Reused seeded user (user_testabc123) + session (Bearer test-token-abc123, 7-day expiry) from iteration_1. Created a few test markets/purchases during testing; deleted the two dashboard test purchases at the end. Test markets (TEST_TotalRecalc, TEST_MultiItem, TEST_EditFlow, TEST_Stock, TEST_UI_M2) remain in test_database -- harmless.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend regression suite: pytest /app/backend/tests/ -v (currently 16/16 PASS). Auth bypass for UI tests: goto -> localStorage.setItem('despensa_token','test-token-abc123') -> reload; allow ~2-3s network idle before asserting dashboard because auth.tsx clears the token if /auth/me is slow/errors. Purchase rows in dashboard have testID='purchase-row-<uuid>' -- clicking navigates to /add-purchase?purchaseId=<uuid> with header 'Editar compra' and testID='delete-purchase-btn'. Bug-fix regression file: /app/backend/tests/test_purchase_total.py covers POST/PUT total recalculation.",
+  "rca_of_issue": "Bug fix RCA (previous total=10000 instead of 30000): server.py line 262/293 was correct in this iteration -- `sum(i.price * (i.quantity if i.quantity and i.quantity > 0 else 1))`. Verified with q=3,price=10000 -> 30000 and q=5,price=10000 -> 50000 via new pytest cases. Boot RCA: previous infinite splash was caused by unresolved Promise chains from icon-font loader and SecureStore/Linking on some devices; fix wraps them in Promise.race with hard timeouts (4s/2s/1.5s/6s) so hideAsync always fires and loading state always resolves. Web preview confirms boot < 1s in both no-token and with-token paths."
+}

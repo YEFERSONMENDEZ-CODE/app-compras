@@ -1,0 +1,173 @@
+{
+  "app_name": "Despensa",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A modern, highly legible fintech-style grocery tracker with fresh green accents and crisp white space.",
+  "color": {
+    "surface": "#FFFFFF",
+    "onSurface": "#111827",
+    "surfaceSecondary": "#F9FAFB",
+    "onSurfaceSecondary": "#374151",
+    "surfaceTertiary": "#F3F4F6",
+    "onSurfaceTertiary": "#4B5563",
+    "surfaceInverse": "#111827",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#059669",
+    "brandPrimary": "#059669",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#D1FAE5",
+    "onBrandSecondary": "#065F46",
+    "brandTertiary": "#ECFDF5",
+    "onBrandTertiary": "#047857",
+    "success": "#10B981",
+    "onSuccess": "#FFFFFF",
+    "warning": "#F59E0B",
+    "onWarning": "#FFFFFF",
+    "error": "#EF4444",
+    "onError": "#FFFFFF",
+    "info": "#3B82F6",
+    "onInfo": "#FFFFFF",
+    "border": "#E5E7EB",
+    "borderStrong": "#D1D5DB",
+    "divider": "#F3F4F6"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Use generous iOS-native rhythms. Padding around cards should be lg (16pt), lists must have 56pt tappable height. Margins must separate semantic sections cleanly.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 1,
+  "navigation": "bottom_tabs",
+  "icon_set": "lucide-react-native",
+  "glassmorphism": {
+    "enabled": true,
+    "do_s": [
+      "Use glass on bottom tab bar.",
+      "Use glass on sticky headers when lists scroll behind.",
+      "Use glass on Floating Action Buttons (FAB)."
+    ],
+    "dont_s": [
+      "Do not use glass on form inputs or standard list rows.",
+      "Do not use glass over plain white backgrounds (loses effect)."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Login",
+      "purpose": "Authenticate users securely via Google Auth with a fresh, welcoming grocery tracker vibe.",
+      "states": {
+        "loading": "Spinner centered.",
+        "empty": "N/A",
+        "error": "Toast with retry option."
+      },
+      "layout": "Full-bleed background hero image (fresh fruits/veggies) with a heavy gradient-to-dark scrim (top-to-bottom, ending at 90% surfaceInverse). Display bold app name and one-liner at bottom 30%, followed by a sticky Google Login button (white pill) at the safe area bottom."
+    },
+    {
+      "name": "Dashboard",
+      "purpose": "Give users an instant snapshot of monthly spending and quick access to recent logged items.",
+      "states": {
+        "loading": "Skeleton of summary card and 3 list rows.",
+        "empty": "Illustration of an empty cart, 'No purchases this month', Add Purchase CTA.",
+        "error": "Centered error text + retry button."
+      },
+      "layout": "Sticky Header with 'Despensa' and total balance summary card (Fintech style: large number, selected currency, monthly breakdown). Below, a 'Recent Transactions' feed (date, market, total). Floating Action Button (FAB) in brand color with glass for adding expenses/scanning."
+    },
+    {
+      "name": "ScanReceipt",
+      "purpose": "Capture supermarket receipts via camera for OCR data extraction.",
+      "states": {
+        "loading": "Camera initialization spinner.",
+        "empty": "N/A",
+        "error": "Permission denied error or scan failed message with manual entry fallback."
+      },
+      "layout": "Full-screen camera modal. Semi-transparent overlay with a clear central framing guide for the receipt. Top bar (glass): Close on left, Flash on right. Bottom: One-tap circular capture button."
+    },
+    {
+      "name": "ReviewOCR",
+      "purpose": "Review and edit data extracted from the receipt before saving.",
+      "states": {
+        "loading": "Spinner with 'Extracting products...'",
+        "empty": "N/A",
+        "error": "Highlight unreadable fields."
+      },
+      "layout": "Single-column form. Top: selected market. Middle: list of extracted products (Name, Qty, Unit [Kg/Un], Price). Bottom: Sticky primary CTA 'Save Purchase' in KeyboardAvoidingView."
+    },
+    {
+      "name": "Markets",
+      "purpose": "Manage favorite supermarkets/vendors.",
+      "states": {
+        "loading": "Skeleton grid.",
+        "empty": "Empty state illustration with 'Add your first market'.",
+        "error": "Toast."
+      },
+      "layout": "Grid or List of favorite supermarkets. Each card has a brandTertiary tinted icon container. 'Add Market' button at top or FAB."
+    },
+    {
+      "name": "Reports",
+      "purpose": "Visualize spending habits across markets and categories.",
+      "states": {
+        "loading": "Skeleton charts.",
+        "empty": "No data available text.",
+        "error": "Retry loading stats."
+      },
+      "layout": "Time range selector at top (glass pinned). Category-colored spending donut chart and a bar chart of spending by Market. Clean, legible axes."
+    },
+    {
+      "name": "CurrencySelector",
+      "purpose": "Select the preferred currency (PYG, USD, EUR, BRL, ARS).",
+      "states": {
+        "loading": "N/A",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "Bottom sheet or modal. Clean list rows (currency code, full name, flag/symbol). Active currency gets a checkmark and brandPrimary tint."
+    }
+  ],
+  "images": {
+    "login_hero": {
+      "url": "https://images.pexels.com/photos/4451867/pexels-photo-4451867.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Variety of fresh fruits and vegetables on white background"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette. No blues, purples, or indigos. Use the #059669 green for all primary brand actions.",
+    "Ensure 'Plus Jakarta Sans' is loaded and used consistently for both text and display, capping weight at 500.",
+    "Implement the gradient scrim (transparent to ≥80% surfaceInverse) on the login screen image so the white text is readable.",
+    "For the camera scanner, use expo-camera in a full-screen view with a visible receipt-bounding frame for user guidance.",
+    "Currency must default to PYG (Guaraní). Use a highly readable numeric layout in Dashboards similar to Robinhood/Cash App (large display size, tight letter spacing).",
+    "List items (markets, products) must have a 56pt minimum tappable height."
+  ]
+}

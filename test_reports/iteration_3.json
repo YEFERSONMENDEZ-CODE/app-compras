@@ -1,0 +1,34 @@
+{
+  "summary": "Regression pass for iOS Expo Go crash fix. VERIFIED (a) app.json newArchEnabled=false at /app/frontend/app.json:10, (b) expo@54.0.37 and expo-constants@18.0.14 installed in node_modules (matches package.json). Backend regression: all 16 pytest cases PASS (test_despensa_api.py 14 + test_purchase_total.py 2) -- currencies, auth session 401 on bogus, /auth/me with Bearer, markets CRUD, purchases CRUD (POST/GET/PUT/DELETE), monthly report, currency update, receipt/scan graceful, and total recalc POST(qty*price=30000) + PUT(qty*price=50000) + multi-item(3000+12000+10000=25000). Frontend web preview boot: (1) NO token -> login screen with google-login-button + 'Despensa' title in 0.50s (< 5s cap), (2) despensa_token='test-token-abc123' in localStorage -> dashboard with all 4 tabs (Inicio/Mercados/Reportes/Ajustes) + 'Hola, Test' greeting + 'Agosto de 2026' + 'Total del mes' in 0.52s (< 8s cap). No infinite splash or red-screen observed. iOS Expo Go crash itself CANNOT be verified in this environment (no real device, per agent_to_agent_context_note) -- only newArchEnabled=false + pinned package versions were verified as instructed. React Native Web deprecation warnings ('shadow*', 'pointerEvents') persist -- non-blocking, carried from iteration_1/2. Edit-purchase flow was fully verified in iteration_2 and code paths unchanged; a follow-up UI attempt in this run hit a cold-start bundle spinner (flaky) so relied on iteration_2 evidence per Loop Prevention.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "global (web preview)", "issue": "React Native Web deprecation warnings still emitted: 'shadow*' style props (use boxShadow) and 'props.pointerEvents is deprecated' (use style.pointerEvents). Non-blocking; carried over from iteration_1/2."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_despensa_api.py",
+    "/app/backend/tests/test_purchase_total.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "USER VERIFICATION REQUIRED on real iOS device: reload Despensa in Expo Go. With newArchEnabled=false + expo@54.0.37 pinned, the splash->crash->'Opening project...' loop should no longer occur. If it still crashes, capture Expo Go's red-box error text (or `npx expo run:ios` console logs) so the RCA can distinguish New Arch vs other native module (likely candidates: expo-camera 17.0.10 / react-native-reanimated 4.1.1 / worklets 0.5.1 on RN 0.81.5) -- we can't reproduce iOS-native crashes from this container.",
+    "OPTIONAL (still open from iter_1/2): migrate RN Web deprecated props (shadow* -> boxShadow, pointerEvents prop -> style.pointerEvents)."
+  ],
+  "critical_code_review_comments": [
+    "auth.tsx checkExisting() still clears the stored token on any non-timeout error from /auth/me. The 401 guard on line 82 is correct; transient network errors correctly retain the token. Behavior unchanged from iteration_2 -- fine.",
+    "_layout.tsx 4s icon-font hard-cap + auth.tsx timeouts (1.5s Linking, 2s getToken, 6s /auth/me) are still in place -- these are the actual safety nets that keep the app from getting stuck on splash even if a native module hangs on iOS. Good.",
+    "package.json pins expo 54.0.37 and expo-constants 18.0.14 with '~' -- if a subsequent yarn install picks up a newer patch that regresses the Expo Go crash, we lose the fix. Consider pinning exactly ('54.0.37' without ~) until iOS crash is confirmed resolved by user."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% for tested web flows (boot-no-token, boot-with-token); iOS Expo Go crash NOT testable in this env"},
+  "seed_data_creation": "Reused seeded user (user_testabc123) + Bearer test-token-abc123 (7-day expiry). Created and deleted one temporary market/purchase during UI edit-flow attempt. Test markets from prior iterations remain harmless in test_database.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Regression suite: pytest /app/backend/tests/ -v (16/16 PASS). Auth bypass for UI: goto '/' -> localStorage.setItem('despensa_token','test-token-abc123') -> reload; the auth.tsx flow has a 6s /auth/me timeout so wait up to 8s for dashboard. testIDs: google-login-button, purchase-row-<uuid>, delete-purchase-btn, add-purchase-fab. iOS Expo Go native crash reports MUST come from the user's phone; container cannot exercise them. Key files to inspect on next iOS regression: /app/frontend/app.json (newArchEnabled), /app/frontend/package.json (expo pin), /app/frontend/app/_layout.tsx (font timeout), /app/frontend/src/auth.tsx (Linking/token timeouts).",
+  "rca_of_issue": "iOS Expo Go crash RCA (per main-agent context): New Architecture (Fabric/TurboModules) was enabled while several native libs on RN 0.81.5 (or their transitive deps) still throw at native init in Expo Go on iOS -- Expo Go builds are the shared native binary shipped by Expo which cannot patch every third-party lib for New Arch. Fix: newArchEnabled=false forces the app to use the paper/legacy renderer that all installed libs support in the shipped Expo Go binary. Package version bumps (expo 54.0.37, expo-constants 18.0.14) also clear the expo-doctor patch-mismatch warning. Verification limit: real iOS device required -- confirmed here only that the config/deps are correctly applied."
+}

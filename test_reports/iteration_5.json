@@ -1,0 +1,41 @@
+{
+  "summary": "Tested new auth methods (email/password, Apple, Facebook) alongside existing Emergent Google OAuth. All 13 backend tests pass (100%). Frontend flow verified end-to-end on mobile viewport (390x844): login-screen -> email-login-btn -> email-auth-screen -> switch-mode-btn -> register with maria2_XXXX@example.com/secret123 -> Dashboard renders with 'Hola, Maria' greeting and all 5 tabs (Inicio, Mercados, Listas, Reportes, Ajustes). Apple button correctly hidden on web (Platform.OS !== ios). Facebook button correctly hidden (providers.facebook=false). Providers endpoint returns {email:true, google:true, apple:true, facebook:false, facebook_app_id:null} as expected. Regression: existing Bearer test-token-abc123 still returns 200 on /auth/me and /markets, so Emergent Google flow is unaffected. Note: console shows two minor React Native Web deprecation warnings ('shadow* style props deprecated', 'pointerEvents deprecated') from library code, not test-blocking.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "shadow* style props", "issue": "React Native Web logs deprecation warning: use style.boxShadow instead of shadow* props (originates from library / theme). Not blocking."},
+      {"component": "pointerEvents prop", "issue": "React Native Web logs deprecation warning: props.pointerEvents is deprecated, use style.pointerEvents. Not blocking."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_auth_methods.py",
+    "/app/test_reports/pytest/auth_methods.xml"
+  ],
+  "action_items": [
+    "Optional: migrate any custom `shadow*` and `pointerEvents` props to style-based equivalents (RN Web) to silence deprecation warnings.",
+    "Optional: Consider testing Apple sign-in on a real iOS device / native build (cannot be verified in web preview per requirements).",
+    "Optional: Set FACEBOOK_APP_ID env var when ready to enable Facebook — endpoint currently returns 503 as designed."
+  ],
+  "critical_code_review_comments": [
+    "server.py auth_login uses a constant-time-ish fake bcrypt verify to prevent user enumeration timing — good.",
+    "_upsert_user_by_email correctly links providers to existing users via email.",
+    "Apple JWT verification correctly uses PyJWKClient + audiences from env (includes host.exp.Exponent for Expo Go).",
+    "Password max length (72 bytes for bcrypt) is properly enforced.",
+    "server.py is 879 lines — approaching the 700-line threshold; consider splitting auth, markets, purchases, shopping-lists into separate router modules."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auth_methods.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Tests create ephemeral users with TEST_reg_<uuid>@example.com prefix and clean up via MongoDB before/after each test. No permanent seed data added.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend tests: pytest /app/backend/tests/test_auth_methods.py -v. Frontend test creds: use fresh email like maria2_<random>@example.com / secret123. Bearer test-token-abc123 still valid for regression on protected endpoints. FACEBOOK_APP_ID intentionally unset -> 503.",
+  "rca_of_issue": "N/A — feature works as specified in the review request."
+}
