@@ -12,6 +12,16 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI
+from fastapi.security import APIKeyHeader
+
+# Configura el esquema de seguridad para Swagger
+api_key_header = APIKeyHeader(name="X-Session-Token", auto_error=False)
+
+app = FastAPI(
+    title="App Compras Backend",
+    swagger_ui_parameters={"persistAuthorization": True}  # Mantiene tu token al recargar
+)
 
 import bcrypt
 import jwt
