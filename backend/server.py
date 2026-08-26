@@ -13,11 +13,11 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
-
 import bcrypt
 import jwt
 from jwt import PyJWKClient
+
+logger = logging.getLogger("uvicorn")
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -28,14 +28,14 @@ db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-# Apple Sign In - audiences must include your bundle id AND host.exp.Exponent for Expo Go
+# Apple Sign In
 APPLE_AUDIENCES = os.environ.get(
     'APPLE_AUDIENCES',
     'com.emergent.monthlyshop.aq7qrl,host.exp.Exponent',
 ).split(',')
 _apple_jwks = PyJWKClient("https://appleid.apple.com/auth/keys", cache_keys=True)
 
-# Facebook App ID (optional — if set, /api/auth/facebook is enabled)
+# Facebook App ID
 FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '')
 
 app = FastAPI()
@@ -207,7 +207,6 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-# ---------- Auth helpers ----------
 def _hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode()
 
@@ -240,7 +239,7 @@ def _user_public(user: dict) -> UserPublic:
     )
 
 async def _upsert_user_by_email(email: str, name: str, picture: Optional[str] = None,
-                                  provider_fields: Optional[dict] = None) -> dict:
+                                provider_fields: Optional[dict] = None) -> dict:
     email = _norm_email(email)
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
@@ -325,7 +324,6 @@ async def auth_me(user: dict = Depends(get_current_user)):
         preferred_currency=user.get("preferred_currency", "PYG"),
     )
 
-# ---------- Email + Password ----------
 @api_router.post("/auth/register", response_model=SessionResponse)
 async def auth_register(payload: RegisterRequest):
     email = _norm_email(payload.email)
@@ -371,7 +369,6 @@ async def auth_login(payload: LoginRequest):
     token = await _issue_session(user["user_id"])
     return SessionResponse(session_token=token, user=_user_public(user))
 
-# ---------- Apple Sign In ----------
 @api_router.post("/auth/apple", response_model=SessionResponse)
 async def auth_apple(payload: AppleAuthRequest):
     try:
@@ -400,7 +397,6 @@ async def auth_apple(payload: AppleAuthRequest):
     token = await _issue_session(user["user_id"])
     return SessionResponse(session_token=token, user=_user_public(user))
 
-# ---------- Facebook Login ----------
 @api_router.post("/auth/facebook", response_model=SessionResponse)
 async def auth_facebook(payload: FacebookAuthRequest):
     if not FACEBOOK_APP_ID:
@@ -433,7 +429,6 @@ async def auth_providers():
         "facebook": bool(FACEBOOK_APP_ID),
         "facebook_app_id": FACEBOOK_APP_ID or None,
     }
-
 
 @api_router.post("/auth/logout")
 async def auth_logout(authorization: Optional[str] = Header(None)):
@@ -611,60 +606,10 @@ async def monthly_report(month: Optional[str] = None, user: dict = Depends(get_c
 # ============ OCR ============
 @api_router.post("/receipt/scan")
 async def scan_receipt(payload: OCRRequest, user: dict = Depends(get_current_user)):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(500, "LLM key not configured")
-    try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"ocr_{user['user_id']}_{uuid.uuid4().hex[:8]}",
-            system_message=(
-                "Eres un asistente experto en extraer productos de facturas y tickets de compra "
-                "de supermercados de Paraguay y Latinoamérica. Devuelves SOLO JSON válido, sin texto adicional."
-            ),
-        ).with_model("openai", "gpt-5.4")
-
-        prompt = (
-            "Analiza esta imagen de una factura o ticket de supermercado. "
-            "Extrae la siguiente información y devuélvela como JSON:\n"
-            "{\n"
-            '  "market_name": "nombre del supermercado o null",\n'
-            '  "currency": "PYG|USD|EUR|BRL|ARS",\n'
-            '  "total": número o null,\n'
-            '  "items": [\n'
-            '    { "name": "nombre del producto", "quantity": número (default 1), "unit": "un" o "kg", "price": número, "category": "verduras|frutas|carnes|lacteos|panaderia|bebidas|limpieza|higiene|otros" }\n'
-            "  ]\n"
-            "}\n\n"
-            "Reglas importantes:\n"
-            "- price es el precio total del item (no unitario)\n"
-            "- Si es kg, unit='kg' y quantity puede ser decimal\n"
-            "- Detecta la moneda por el formato: Gs./₲ = PYG, R$ = BRL, US$/$ = USD, € = EUR, AR$ = ARS\n"
-            "- Devuelve SOLO el JSON, sin markdown ni explicaciones\n"
-            "- Si no puedes leer nada, devuelve items: []"
-        )
-
-        image = ImageContent(image_base64=payload.image_base64)
-        response = await chat.send_message(UserMessage(text=prompt, file_contents=[image]))
-        text = response if isinstance(response, str) else str(response)
-
-        # Strip markdown fences if present
-        text = text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-
-        # Try to find JSON object
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            text = match.group(0)
-
-        parsed = json.loads(text)
-        return parsed
-    except json.JSONDecodeError as e:
-        logger.error(f"OCR JSON parse error: {e}")
-        return {"market_name": None, "currency": payload.currency, "total": None, "items": []}
-    except Exception as e:
-        logger.exception("OCR error")
-        raise HTTPException(500, f"OCR failed: {str(e)}")
+    raise HTTPException(
+        status_code=501, 
+        detail="Servicio de escaneo OCR temporalmente no disponible"
+    )
 
 # ============ SHOPPING LISTS ROUTES ============
 @api_router.get("/shopping-lists", response_model=List[ShoppingList])
@@ -730,16 +675,13 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
 
     upd_dict = payload.dict(exclude_unset=True)
 
-    # If setting paid_market_id, also stamp the market name
     if "paid_market_id" in upd_dict and upd_dict["paid_market_id"]:
         market = await db.markets.find_one({"id": upd_dict["paid_market_id"], "user_id": user["user_id"]}, {"_id": 0})
         if market:
             upd_dict["paid_market_name"] = market["name"]
 
-    # If status is set to bought and paid_at not set, stamp it
     if upd_dict.get("status") == "bought" and not items[idx].get("paid_at"):
         upd_dict["paid_at"] = datetime.now(timezone.utc)
-    # Clear paid_at when unmarking bought
     if "status" in upd_dict and upd_dict["status"] != "bought":
         upd_dict["paid_at"] = None
         upd_dict.setdefault("paid_price", None)
@@ -767,16 +709,13 @@ async def delete_shopping_list_item(list_id: str, item_id: str, user: dict = Dep
     updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     return ShoppingList(**updated)
 
-# ============ PRODUCT HISTORY (for shopping list "select from previous") ============
+# ============ PRODUCT HISTORY ============
 @api_router.get("/products/history")
 async def products_history(q: Optional[str] = None, user: dict = Depends(get_current_user)):
-    # Aggregate every item ever purchased by the user, grouped by
-    # normalised name, keeping the last price per market.
     rows = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
 
     products: dict = {}
     for r in rows:
-        market_id = r.get("market_id")
         market_name = r.get("market_name", "Otro")
         currency = r.get("currency", "PYG")
         date = r.get("date")
@@ -790,89 +729,28 @@ async def products_history(q: Optional[str] = None, user: dict = Depends(get_cur
                 "category": it.get("category", "otros"),
                 "unit": it.get("unit", "un"),
                 "prices": {},
-                "last_used": date,
             })
-            if it.get("category"):
-                entry["category"] = it["category"]
-            price = it.get("price", 0)
-            existing = entry["prices"].get(market_id)
-            if not existing or (date and existing.get("date") and date > existing["date"]) or not existing.get("date"):
-                entry["prices"][market_id] = {
-                    "market_id": market_id,
-                    "market_name": market_name,
-                    "price": price,
+            if market_name not in entry["prices"]:
+                entry["prices"][market_name] = {
+                    "price": it.get("price", 0),
                     "currency": currency,
                     "date": date,
                 }
-            if date and (not entry["last_used"] or date > entry["last_used"]):
-                entry["last_used"] = date
 
-    out = []
-    for key, entry in products.items():
-        prices_list = sorted(entry["prices"].values(), key=lambda x: x["price"])
-        cheapest = prices_list[0] if prices_list else None
-        out.append({
-            "name": entry["name"],
-            "category": entry["category"],
-            "unit": entry["unit"],
-            "prices": prices_list,
-            "cheapest_market_id": cheapest["market_id"] if cheapest else None,
-            "cheapest_market_name": cheapest["market_name"] if cheapest else None,
-            "cheapest_price": cheapest["price"] if cheapest else None,
-            "cheapest_currency": cheapest["currency"] if cheapest else None,
-            "last_used": entry["last_used"],
-        })
+    result = list(products.values())
     if q:
-        ql = q.lower().strip()
-        out = [p for p in out if ql in p["name"].lower()]
-    out.sort(key=lambda p: (p.get("last_used") or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
-    return out[:200]
+        q_lower = q.lower()
+        result = [p for p in result if q_lower in p["name"].lower()]
 
-# ============ CURRENCIES ============
-@api_router.get("/currencies")
-async def currencies():
-    return [
-        {"code": "PYG", "name": "Guaraní Paraguayo", "symbol": "₲", "flag": "🇵🇾", "decimals": 0},
-        {"code": "USD", "name": "Dólar Estadounidense", "symbol": "$", "flag": "🇺🇸", "decimals": 2},
-        {"code": "EUR", "name": "Euro", "symbol": "€", "flag": "🇪🇺", "decimals": 2},
-        {"code": "BRL", "name": "Real Brasileño", "symbol": "R$", "flag": "🇧🇷", "decimals": 2},
-        {"code": "ARS", "name": "Peso Argentino", "symbol": "$", "flag": "🇦🇷", "decimals": 2},
-    ]
+    return result
 
-@api_router.get("/")
-async def root():
-    return {"message": "Despensa API"}
-
-app.include_router(api_router)
-
+# ============ REGISTER ROUTER & MIDDLEWARE ============
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("startup")
-async def startup_indexes():
-    try:
-        await db.users.create_index("email", unique=True)
-        await db.users.create_index("user_id", unique=True)
-        await db.user_sessions.create_index("session_token", unique=True)
-        await db.user_sessions.create_index("user_id")
-        await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
-        await db.markets.create_index([("user_id", 1), ("id", 1)])
-        await db.purchases.create_index([("user_id", 1), ("date", -1)])
-        await db.shopping_lists.create_index([("user_id", 1), ("created_at", -1)])
-    except Exception as e:
-        logger.warning(f"Index creation warning: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+app.include_router(api_router)
