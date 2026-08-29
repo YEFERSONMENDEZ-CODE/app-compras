@@ -170,9 +170,9 @@ export default function ShoppingListDetail() {
 
       <AddItemSheet
         visible={addOpen}
-        onClose={() => setAddOpen(false)}
-        listId={list.id}
-        onAdded={(updated) => { setList(updated); }}
+  onClose={() => setAddOpen(false)}
+  listId={list.id}
+  onAdded={(updated: any) => { setList(updated); }}
       />
 
       <MarkBoughtSheet
@@ -181,7 +181,7 @@ export default function ShoppingListDetail() {
         currency={list.currency}
         currencySymbol={currInfo.symbol}
         onClose={() => setBuyItem(null)}
-        onSave={async (patch) => {
+        onSave={async (patch: any)=> {
           if (!buyItem) return;
           await updateItem(buyItem.id, { ...patch, status: "bought" });
           setBuyItem(null);
@@ -403,7 +403,7 @@ function AddItemSheet({ visible, onClose, listId, onAdded }: any) {
                         <Text style={styles.histName}>{p.name}</Text>
                         <Text style={styles.histCat}>{CATEGORY_LABEL[p.category] || "Otros"}</Text>
                         <View style={styles.priceList}>
-                          {p.prices.map((pr, idx) => (
+                          {(Array.isArray(p?.prices) ? p.prices : []).map((pr, idx) => (
                             <View key={pr.market_id || idx} style={[styles.pricePill, idx === 0 && p.prices.length > 1 && styles.pricePillBest]}>
                               {idx === 0 && p.prices.length > 1 && <Trophy color={theme.colors.success} size={11} />}
                               <Text style={[styles.priceMkt, idx === 0 && p.prices.length > 1 && { color: theme.colors.success }]}>

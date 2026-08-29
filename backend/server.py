@@ -1,54 +1,55 @@
+# pyright: reportPrivateImportUsage=false, reportOptionalSubscript=false
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import json
-import re
 import uuid
+import base64
 import httpx
+import google.generativeai as genai
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any, cast
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI
-from fastapi.security import APIKeyHeader
-
-# Configura el esquema de seguridad para Swagger
-api_key_header = APIKeyHeader(name="X-Session-Token", auto_error=False)
-
-app = FastAPI(
-    title="App Compras Backend",
-    swagger_ui_parameters={"persistAuthorization": True}  # Mantiene tu token al recargar
-)
-
 import bcrypt
 import jwt
 from jwt import PyJWKClient
 
+# Configuración del Logger
 logger = logging.getLogger("uvicorn")
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
+# Configuración MongoDB
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'test_database')]
 
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+# Configuración Gemini API Key
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# Apple Sign In
+# Configuración Apple / Facebook
 APPLE_AUDIENCES = os.environ.get(
     'APPLE_AUDIENCES',
     'com.emergent.monthlyshop.aq7qrl,host.exp.Exponent',
 ).split(',')
 _apple_jwks = PyJWKClient("https://appleid.apple.com/auth/keys", cache_keys=True)
-
-# Facebook App ID
 FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '')
 
-app = FastAPI()
+# Inicialización FastAPI
+app = FastAPI(
+    title="App Compras Backend",
+    swagger_ui_parameters={"persistAuthorization": True}
+)
+
+api_key_header = APIKeyHeader(name="X-Session-Token", auto_error=False)
 api_router = APIRouter(prefix="/api")
 
 # ============ MODELS ============
@@ -151,7 +152,7 @@ class AppleAuthRequest(BaseModel):
 class FacebookAuthRequest(BaseModel):
     access_token: str
 
-# ============ SHOPPING LISTS ============
+# ============ SHOPPING LISTS MODELS ============
 class ShoppingListItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -199,7 +200,7 @@ class ShoppingListUpdate(BaseModel):
     currency: Optional[str] = None
 
 # ============ AUTH HELPERS ============
-async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
     token = authorization.replace("Bearer ", "").strip()
@@ -215,7 +216,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-    return user
+    return cast(Dict[str, Any], user)
 
 def _hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode()
@@ -239,21 +240,23 @@ async def _issue_session(user_id: str) -> str:
     })
     return token
 
-def _user_public(user: dict) -> UserPublic:
+def _user_public(user: Optional[Dict[str, Any]]) -> UserPublic:
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return UserPublic(
-        user_id=user["user_id"],
-        email=user["email"],
-        name=user.get("name") or user["email"],
-        picture=user.get("picture"),
-        preferred_currency=user.get("preferred_currency", "PYG"),
+        user_id=str(user.get("user_id", "")),
+        email=str(user.get("email", "")),
+        name=str(user.get("name") or user.get("email", "")),
+        picture=cast(Optional[str], user.get("picture")),
+        preferred_currency=str(user.get("preferred_currency", "PYG")),
     )
 
 async def _upsert_user_by_email(email: str, name: str, picture: Optional[str] = None,
-                                provider_fields: Optional[dict] = None) -> dict:
+                                provider_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     email = _norm_email(email)
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
-        upd = {"name": existing.get("name") or name}
+        upd: Dict[str, Any] = {"name": existing.get("name") or name}
         if picture and not existing.get("picture"):
             upd["picture"] = picture
         if provider_fields:
@@ -261,7 +264,7 @@ async def _upsert_user_by_email(email: str, name: str, picture: Optional[str] = 
         await db.users.update_one({"user_id": existing["user_id"]}, {"$set": upd})
         return {**existing, **upd}
     user_id = f"user_{uuid.uuid4().hex[:12]}"
-    doc = {
+    doc: Dict[str, Any] = {
         "user_id": user_id,
         "email": email,
         "name": name or email.split("@", 1)[0],
@@ -315,24 +318,12 @@ async def auth_session(payload: SessionRequest):
 
     return SessionResponse(
         session_token=session_token,
-        user=UserPublic(
-            user_id=user["user_id"],
-            email=user["email"],
-            name=user["name"],
-            picture=user.get("picture"),
-            preferred_currency=user.get("preferred_currency", "PYG"),
-        ),
+        user=_user_public(user),
     )
 
 @api_router.get("/auth/me", response_model=UserPublic)
-async def auth_me(user: dict = Depends(get_current_user)):
-    return UserPublic(
-        user_id=user["user_id"],
-        email=user["email"],
-        name=user["name"],
-        picture=user.get("picture"),
-        preferred_currency=user.get("preferred_currency", "PYG"),
-    )
+async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
+    return _user_public(user)
 
 @api_router.post("/auth/register", response_model=SessionResponse)
 async def auth_register(payload: RegisterRequest):
@@ -448,25 +439,25 @@ async def auth_logout(authorization: Optional[str] = Header(None)):
     return {"ok": True}
 
 @api_router.put("/auth/currency", response_model=UserPublic)
-async def update_currency(payload: CurrencyUpdate, user: dict = Depends(get_current_user)):
+async def update_currency(payload: CurrencyUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"preferred_currency": payload.currency}})
     user["preferred_currency"] = payload.currency
-    return UserPublic(**{k: user.get(k) for k in ["user_id", "email", "name", "picture", "preferred_currency"]})
+    return _user_public(user)
 
 # ============ MARKETS ============
 @api_router.get("/markets", response_model=List[Market])
-async def list_markets(user: dict = Depends(get_current_user)):
+async def list_markets(user: Dict[str, Any] = Depends(get_current_user)):
     rows = await db.markets.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", 1).to_list(500)
-    return [Market(**r) for r in rows]
+    return [Market(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/markets", response_model=Market)
-async def create_market(payload: MarketCreate, user: dict = Depends(get_current_user)):
+async def create_market(payload: MarketCreate, user: Dict[str, Any] = Depends(get_current_user)):
     m = Market(user_id=user["user_id"], **payload.dict(exclude_none=True))
     await db.markets.insert_one(m.dict())
     return m
 
 @api_router.put("/markets/{market_id}", response_model=Market)
-async def update_market(market_id: str, payload: MarketUpdate, user: dict = Depends(get_current_user)):
+async def update_market(market_id: str, payload: MarketUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     upd = {k: v for k, v in payload.dict().items() if v is not None}
     r = await db.markets.find_one_and_update(
         {"id": market_id, "user_id": user["user_id"]},
@@ -476,10 +467,10 @@ async def update_market(market_id: str, payload: MarketUpdate, user: dict = Depe
     )
     if not r:
         raise HTTPException(404, "Market not found")
-    return Market(**r)
+    return Market(**cast(Dict[str, Any], r))
 
 @api_router.delete("/markets/{market_id}")
-async def delete_market(market_id: str, user: dict = Depends(get_current_user)):
+async def delete_market(market_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.markets.delete_one({"id": market_id, "user_id": user["user_id"]})
     if r.deleted_count == 0:
         raise HTTPException(404, "Market not found")
@@ -487,8 +478,8 @@ async def delete_market(market_id: str, user: dict = Depends(get_current_user)):
 
 # ============ PURCHASES ============
 @api_router.get("/purchases", response_model=List[Purchase])
-async def list_purchases(month: Optional[str] = None, market_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    q = {"user_id": user["user_id"]}
+async def list_purchases(month: Optional[str] = None, market_id: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
+    q: Dict[str, Any] = {"user_id": user["user_id"]}
     if market_id:
         q["market_id"] = market_id
     if month:
@@ -503,10 +494,10 @@ async def list_purchases(month: Optional[str] = None, market_id: Optional[str] =
         except Exception:
             pass
     rows = await db.purchases.find(q, {"_id": 0}).sort("date", -1).to_list(1000)
-    return [Purchase(**r) for r in rows]
+    return [Purchase(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/purchases", response_model=Purchase)
-async def create_purchase(payload: PurchaseCreate, user: dict = Depends(get_current_user)):
+async def create_purchase(payload: PurchaseCreate, user: Dict[str, Any] = Depends(get_current_user)):
     market = await db.markets.find_one({"id": payload.market_id, "user_id": user["user_id"]}, {"_id": 0})
     if not market:
         raise HTTPException(404, "Market not found")
@@ -527,14 +518,14 @@ async def create_purchase(payload: PurchaseCreate, user: dict = Depends(get_curr
     return p
 
 @api_router.get("/purchases/{purchase_id}", response_model=Purchase)
-async def get_purchase(purchase_id: str, user: dict = Depends(get_current_user)):
+async def get_purchase(purchase_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
     if not r:
         raise HTTPException(404, "Purchase not found")
-    return Purchase(**r)
+    return Purchase(**cast(Dict[str, Any], r))
 
 @api_router.put("/purchases/{purchase_id}", response_model=Purchase)
-async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: dict = Depends(get_current_user)):
+async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: Dict[str, Any] = Depends(get_current_user)):
     existing = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Purchase not found")
@@ -554,10 +545,10 @@ async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: dict 
     }
     await db.purchases.update_one({"id": purchase_id, "user_id": user["user_id"]}, {"$set": updated})
     doc = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
-    return Purchase(**doc)
+    return Purchase(**cast(Dict[str, Any], doc))
 
 @api_router.delete("/purchases/{purchase_id}")
-async def delete_purchase(purchase_id: str, user: dict = Depends(get_current_user)):
+async def delete_purchase(purchase_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.purchases.delete_one({"id": purchase_id, "user_id": user["user_id"]})
     if r.deleted_count == 0:
         raise HTTPException(404, "Purchase not found")
@@ -565,7 +556,7 @@ async def delete_purchase(purchase_id: str, user: dict = Depends(get_current_use
 
 # ============ REPORTS ============
 @api_router.get("/reports/monthly")
-async def monthly_report(month: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def monthly_report(month: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
     now = datetime.now(timezone.utc)
     if not month:
         month = f"{now.year:04d}-{now.month:02d}"
@@ -578,10 +569,10 @@ async def monthly_report(month: Optional[str] = None, user: dict = Depends(get_c
         "date": {"$gte": start, "$lt": end},
     }, {"_id": 0}).to_list(2000)
 
-    total_by_currency = {}
-    by_market = {}
-    by_category = {}
-    by_day = {}
+    total_by_currency: Dict[str, float] = {}
+    by_market: Dict[str, Dict[str, float]] = {}
+    by_category: Dict[str, Dict[str, float]] = {}
+    by_day: Dict[str, Dict[str, float]] = {}
     purchase_count = len(rows)
     item_count = 0
 
@@ -613,35 +604,83 @@ async def monthly_report(month: Optional[str] = None, user: dict = Depends(get_c
         "by_day": by_day,
     }
 
-# ============ OCR ============
+# ============ OCR / GEMINI ESCANEO DE FACTURAS ============
 @api_router.post("/receipt/scan")
-async def scan_receipt(payload: OCRRequest, user: dict = Depends(get_current_user)):
-    raise HTTPException(
-        status_code=501, 
-        detail="Servicio de escaneo OCR temporalmente no disponible"
-    )
+async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    image_b64 = payload.image_base64
+    currency = payload.currency or "PYG"
+
+    if not image_b64:
+        raise HTTPException(status_code=400, detail="Imagen no proporcionada")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500, 
+            detail="La clave GEMINI_API_KEY no está configurada en el archivo .env"
+        )
+
+    try:
+        genai.configure(api_key=api_key)  # type: ignore
+
+        if "," in image_b64:
+            image_b64 = image_b64.split(",", 1)[1]
+
+        image_bytes = base64.b64decode(image_b64)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        prompt = f"""
+        Analiza esta imagen de factura/ticket y extrae los ítems comprados.
+        Devuelve EXCLUSIVAMENTE un objeto JSON válido con esta estructura exacta (sin formato markdown ni texto explicativo):
+        {{
+          "currency": "{currency}",
+          "items": [
+            {{
+              "name": "Nombre del producto",
+              "quantity": 1,
+              "unit": "un",
+              "price": 5000,
+              "category": "otros"
+            }}
+          ]
+        }}
+        """
+
+        response = model.generate_content([
+            {"mime_type": "image/jpeg", "data": image_bytes},
+            prompt
+        ])
+
+        clean_text = (response.text or "").strip().replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean_text)
+
+        return parsed
+
+    except Exception as e:
+        logger.error(f"Error procesando escaneo con Gemini: {e}")
+        raise HTTPException(status_code=500, detail="Error de la IA al leer la factura")
 
 # ============ SHOPPING LISTS ROUTES ============
 @api_router.get("/shopping-lists", response_model=List[ShoppingList])
-async def list_shopping_lists(user: dict = Depends(get_current_user)):
+async def list_shopping_lists(user: Dict[str, Any] = Depends(get_current_user)):
     rows = await db.shopping_lists.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return [ShoppingList(**r) for r in rows]
+    return [ShoppingList(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/shopping-lists", response_model=ShoppingList)
-async def create_shopping_list(payload: ShoppingListCreate, user: dict = Depends(get_current_user)):
+async def create_shopping_list(payload: ShoppingListCreate, user: Dict[str, Any] = Depends(get_current_user)):
     sl = ShoppingList(user_id=user["user_id"], name=payload.name.strip(), currency=payload.currency, items=[])
     await db.shopping_lists.insert_one(sl.dict())
     return sl
 
 @api_router.get("/shopping-lists/{list_id}", response_model=ShoppingList)
-async def get_shopping_list(list_id: str, user: dict = Depends(get_current_user)):
+async def get_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     if not r:
         raise HTTPException(404, "List not found")
-    return ShoppingList(**r)
+    return ShoppingList(**cast(Dict[str, Any], r))
 
 @api_router.put("/shopping-lists/{list_id}", response_model=ShoppingList)
-async def update_shopping_list(list_id: str, payload: ShoppingListUpdate, user: dict = Depends(get_current_user)):
+async def update_shopping_list(list_id: str, payload: ShoppingListUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     upd = {k: v for k, v in payload.dict().items() if v is not None}
     r = await db.shopping_lists.find_one_and_update(
         {"id": list_id, "user_id": user["user_id"]},
@@ -651,17 +690,17 @@ async def update_shopping_list(list_id: str, payload: ShoppingListUpdate, user: 
     )
     if not r:
         raise HTTPException(404, "List not found")
-    return ShoppingList(**r)
+    return ShoppingList(**cast(Dict[str, Any], r))
 
 @api_router.delete("/shopping-lists/{list_id}")
-async def delete_shopping_list(list_id: str, user: dict = Depends(get_current_user)):
+async def delete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.shopping_lists.delete_one({"id": list_id, "user_id": user["user_id"]})
     if r.deleted_count == 0:
         raise HTTPException(404, "List not found")
     return {"ok": True}
 
 @api_router.post("/shopping-lists/{list_id}/items", response_model=ShoppingList)
-async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, user: dict = Depends(get_current_user)):
+async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, user: Dict[str, Any] = Depends(get_current_user)):
     sl = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     if not sl:
         raise HTTPException(404, "List not found")
@@ -671,10 +710,10 @@ async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, 
         {"$push": {"items": item.dict()}},
     )
     updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
-    return ShoppingList(**updated)
+    return ShoppingList(**cast(Dict[str, Any], updated))
 
 @api_router.put("/shopping-lists/{list_id}/items/{item_id}", response_model=ShoppingList)
-async def update_shopping_list_item(list_id: str, item_id: str, payload: ShoppingListItemUpdate, user: dict = Depends(get_current_user)):
+async def update_shopping_list_item(list_id: str, item_id: str, payload: ShoppingListItemUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     sl = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     if not sl:
         raise HTTPException(404, "List not found")
@@ -706,10 +745,10 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
         {"$set": {"items": items}},
     )
     updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
-    return ShoppingList(**updated)
+    return ShoppingList(**cast(Dict[str, Any], updated))
 
 @api_router.delete("/shopping-lists/{list_id}/items/{item_id}", response_model=ShoppingList)
-async def delete_shopping_list_item(list_id: str, item_id: str, user: dict = Depends(get_current_user)):
+async def delete_shopping_list_item(list_id: str, item_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     r = await db.shopping_lists.update_one(
         {"id": list_id, "user_id": user["user_id"]},
         {"$pull": {"items": {"id": item_id}}},
@@ -717,14 +756,14 @@ async def delete_shopping_list_item(list_id: str, item_id: str, user: dict = Dep
     if r.matched_count == 0:
         raise HTTPException(404, "List not found")
     updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
-    return ShoppingList(**updated)
+    return ShoppingList(**cast(Dict[str, Any], updated))
 
 # ============ PRODUCT HISTORY ============
 @api_router.get("/products/history")
-async def products_history(q: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def products_history(q: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
     rows = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
 
-    products: dict = {}
+    products: Dict[str, Any] = {}
     for r in rows:
         market_name = r.get("market_name", "Otro")
         currency = r.get("currency", "PYG")

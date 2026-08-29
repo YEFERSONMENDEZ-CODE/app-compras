@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ActivityIndicator, Platform, Modal } from "react-native";
+import { View, Text, StyleSheet, Pressable, ActivityIndicator, Platform, Modal, Alert} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -8,6 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import { theme } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+
 
 export default function ScanReceipt() {
   const router = useRouter();
@@ -23,22 +24,29 @@ export default function ScanReceipt() {
   }, [perm]);
 
   const processImage = async (base64: string) => {
-    setProcessing(true);
-    try {
-      const result: any = await api("/receipt/scan", {
-        method: "POST",
-        body: { image_base64: base64, currency: user?.preferred_currency || "PYG" },
-      });
-      const preload = JSON.stringify({
-        currency: result.currency || user?.preferred_currency || "PYG",
-        items: result.items || [],
-      });
-      router.replace({ pathname: "/add-purchase", params: { preload } });
-    } catch (e: any) {
-      console.warn("scan error", e);
-      setProcessing(false);
-    }
-  };
+  setProcessing(true);
+  try {
+    const result: any = await api("/receipt/scan", {
+      method: "POST",
+      body: { image_base64: base64, currency: user?.preferred_currency || "PYG" },
+    });
+
+    const preload = JSON.stringify({
+      currency: result.currency || user?.preferred_currency || "PYG",
+      items: result.items || [],
+    });
+
+    router.replace({ pathname: "/add-purchase", params: { preload } });
+  } catch (e: any) {
+    console.warn("scan error", e);
+    Alert.alert(
+      "Error al escanear",
+      e?.message || "No se pudo procesar la factura. Intenta enfocar mejor la imagen."
+    );
+  } finally {
+    setProcessing(false);
+  }
+};
 
   const takePhoto = async () => {
     if (!cameraRef.current || processing) return;
