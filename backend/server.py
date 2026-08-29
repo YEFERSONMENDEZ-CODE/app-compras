@@ -18,6 +18,8 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from jwt import PyJWKClient
+import google.generativeai as genai
+from google.oauth2.credentials import Credentials
 
 # Configuración del Logger
 logger = logging.getLogger("uvicorn")
@@ -31,8 +33,14 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'test_database')]
 
 # Configuración Gemini API Key
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-if GEMINI_API_KEY:
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+if GEMINI_API_KEY.startswith("AQ."):
+    # Soporte para tokens de proyectos Google Cloud / AI Studio (AQ...)
+    credentials = Credentials(token=GEMINI_API_KEY)
+    genai.configure(credentials=credentials)
+else:
+    # Soporte para claves de API estándar (AIzaSy...)
     genai.configure(api_key=GEMINI_API_KEY)
 
 # Configuración Apple / Facebook
