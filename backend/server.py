@@ -1,5 +1,6 @@
 # pyright: reportPrivateImportUsage=false, reportOptionalSubscript=false
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -8,11 +9,14 @@ import os
 import logging
 import uuid
 import base64
+import hashlib
+import secrets
 import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any, cast
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 import bcrypt
 import jwt
 from jwt import PyJWKClient
@@ -39,7 +43,11 @@ APPLE_AUDIENCES = os.environ.get(
     'com.emergent.monthlyshop.aq7qrl,host.exp.Exponent',
 ).split(',')
 _apple_jwks = PyJWKClient("https://appleid.apple.com/auth/keys", cache_keys=True)
+_google_jwks = PyJWKClient("https://www.googleapis.com/oauth2/v3/certs", cache_keys=True)
 FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '')
+GOOGLE_OAUTH_WEB_REDIRECT = "https://despensa-web.onrender.com/"
+GOOGLE_OAUTH_APP_REDIRECT = "frontend://auth"
+GOOGLE_OAUTH_CALLBACK_DEFAULT = "https://app-compras-backend.onrender.com/api/auth/google/callback"
 
 # Inicialización FastAPI
 app = FastAPI(
@@ -51,9 +59,6 @@ api_key_header = APIKeyHeader(name="X-Session-Token", auto_error=False)
 api_router = APIRouter(prefix="/api")
 
 # ============ MODELS ============
-class SessionRequest(BaseModel):
-    session_id: str
-
 class User(BaseModel):
     user_id: str
     email: str
@@ -151,6 +156,9 @@ class AppleAuthRequest(BaseModel):
 
 class FacebookAuthRequest(BaseModel):
     access_token: str
+
+class GoogleCodeExchange(BaseModel):
+    auth_code: str = Field(..., min_length=20, max_length=256)
 
 # ============ SHOPPING LISTS MODELS ============
 class ShoppingListItem(BaseModel):
@@ -297,48 +305,145 @@ async def _upsert_user_by_email(email: str, name: str, picture: Optional[str] = 
     return doc
 
 # ============ AUTH ROUTES ============
-@api_router.post("/auth/session", response_model=SessionResponse)
-async def auth_session(payload: SessionRequest):
-    session_id = payload.session_id
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id required")
-    async with httpx.AsyncClient(timeout=15) as http:
-        r = await http.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id},
-        )
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session_id")
-    data = r.json()
-    email = data.get("email")
-    name = data.get("name") or email
-    picture = data.get("picture")
-    session_token = data.get("session_token")
-    if not email or not session_token:
-        raise HTTPException(status_code=401, detail="Missing auth data")
+def _google_oauth_config() -> tuple[str, str, str]:
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    callback_url = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", GOOGLE_OAUTH_CALLBACK_DEFAULT).strip()
+    return client_id, client_secret, callback_url
 
-    existing = await db.users.find_one({"email": email}, {"_id": 0})
-    if existing:
-        user_id = existing["user_id"]
-        await db.users.update_one({"user_id": user_id}, {"$set": {"name": name, "picture": picture}})
-        user = {**existing, "name": name, "picture": picture}
-    else:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        user_obj = User(user_id=user_id, email=email, name=name, picture=picture)
-        await db.users.insert_one(user_obj.dict())
-        user = user_obj.dict()
 
-    await db.user_sessions.insert_one({
-        "session_token": session_token,
-        "user_id": user_id,
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
-        "created_at": datetime.now(timezone.utc),
+def _google_oauth_redirect_targets() -> set[str]:
+    configured = os.environ.get("GOOGLE_OAUTH_ALLOWED_REDIRECTS", "")
+    targets = configured.split(",") if configured.strip() else [
+        GOOGLE_OAUTH_WEB_REDIRECT,
+        GOOGLE_OAUTH_APP_REDIRECT,
+    ]
+    return {target.strip() for target in targets if target.strip()}
+
+
+def _append_auth_query(url: str, **params: str) -> str:
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.extend((key, value) for key, value in params.items())
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+@api_router.get("/auth/google/start")
+async def google_auth_start(redirect_uri: str):
+    client_id, client_secret, callback_url = _google_oauth_config()
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=503, detail="El inicio de sesión con Google aún no está configurado")
+    if redirect_uri not in _google_oauth_redirect_targets():
+        raise HTTPException(status_code=400, detail="URI de retorno no permitida")
+
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    await db.google_oauth_states.delete_many({"expires_at": {"$lte": now}})
+    await db.google_oauth_states.insert_one({
+        "state_hash": hashlib.sha256(state.encode()).hexdigest(),
+        "nonce": nonce,
+        "redirect_uri": redirect_uri,
+        "expires_at": now + timedelta(minutes=10),
     })
 
-    return SessionResponse(
-        session_token=session_token,
-        user=_user_public(user),
-    )
+    query = urlencode({
+        "client_id": client_id,
+        "redirect_uri": callback_url,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": nonce,
+        "prompt": "select_account",
+    })
+    response = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}", status_code=302)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@api_router.get("/auth/google/callback")
+async def google_auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    if not state:
+        raise HTTPException(status_code=400, detail="Estado OAuth inválido")
+    now = datetime.now(timezone.utc)
+    state_doc = await db.google_oauth_states.find_one_and_delete({
+        "state_hash": hashlib.sha256(state.encode()).hexdigest(),
+        "expires_at": {"$gt": now},
+    })
+    if not state_doc:
+        raise HTTPException(status_code=400, detail="La sesión de Google expiró o ya fue utilizada")
+    redirect_uri = state_doc["redirect_uri"]
+    if error or not code:
+        return RedirectResponse(_append_auth_query(redirect_uri, auth_error="Inicio de sesión cancelado"))
+
+    client_id, client_secret, callback_url = _google_oauth_config()
+    if not client_id or not client_secret:
+        return RedirectResponse(_append_auth_query(redirect_uri, auth_error="Google no está configurado en el servidor"))
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            response = await http.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": callback_url,
+                    "grant_type": "authorization_code",
+                },
+            )
+        response.raise_for_status()
+        id_token = response.json().get("id_token")
+        if not id_token:
+            raise ValueError("Google no devolvió un token de identidad")
+        signing_key = await run_in_threadpool(_google_jwks.get_signing_key_from_jwt, id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=client_id,
+            issuer=["accounts.google.com", "https://accounts.google.com"],
+        )
+        if claims.get("nonce") != state_doc["nonce"]:
+            raise ValueError("Nonce de Google inválido")
+        email = _norm_email(str(claims.get("email") or ""))
+        if not claims.get("sub") or not email or claims.get("email_verified") is not True:
+            raise ValueError("La cuenta de Google no devolvió un correo verificado")
+        user = await _upsert_user_by_email(
+            email,
+            str(claims.get("name") or email.split("@", 1)[0]),
+            picture=claims.get("picture"),
+            provider_fields={"google_sub": str(claims["sub"])},
+        )
+        auth_code = secrets.token_urlsafe(32)
+        await db.google_oauth_codes.delete_many({"expires_at": {"$lte": now}})
+        await db.google_oauth_codes.insert_one({
+            "code_hash": hashlib.sha256(auth_code.encode()).hexdigest(),
+            "user_id": user["user_id"],
+            "expires_at": now + timedelta(minutes=2),
+        })
+    except Exception:
+        logger.exception("Error completando el inicio de sesión propio de Google")
+        return RedirectResponse(_append_auth_query(redirect_uri, auth_error="No se pudo validar la cuenta de Google"))
+
+    return RedirectResponse(_append_auth_query(redirect_uri, auth_code=auth_code))
+
+
+@api_router.post("/auth/google/exchange", response_model=SessionResponse)
+async def google_auth_exchange(payload: GoogleCodeExchange):
+    now = datetime.now(timezone.utc)
+    await db.google_oauth_codes.delete_many({"expires_at": {"$lte": now}})
+    code_doc = await db.google_oauth_codes.find_one_and_delete({
+        "code_hash": hashlib.sha256(payload.auth_code.encode()).hexdigest(),
+        "expires_at": {"$gt": now},
+    })
+    if not code_doc:
+        raise HTTPException(status_code=401, detail="Código de inicio de sesión inválido o vencido")
+    user = await db.users.find_one({"user_id": code_doc["user_id"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado")
+    token = await _issue_session(user["user_id"])
+    return SessionResponse(session_token=token, user=_user_public(user))
 
 @api_router.get("/auth/me", response_model=UserPublic)
 async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
@@ -445,7 +550,9 @@ async def auth_facebook(payload: FacebookAuthRequest):
 @api_router.get("/auth/providers")
 async def auth_providers():
     return {
-        "email": True, "google": True, "apple": True,
+        "email": True,
+        "google": bool(_google_oauth_config()[0] and _google_oauth_config()[1]),
+        "apple": True,
         "facebook": bool(FACEBOOK_APP_ID),
         "facebook_app_id": FACEBOOK_APP_ID or None,
     }

@@ -17,6 +17,7 @@ export type User = {
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
+  googleAuthError: string | null;
   signIn: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   registerWithEmail: (email: string, password: string, name?: string) => Promise<void>;
@@ -29,31 +30,42 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-const processedSessions = new Set<string>();
+const processedAuthCodes = new Set<string>();
 
-function extractSessionId(url: string): string | null {
+function extractQueryValue(url: string, key: string): string | null {
   if (!url) return null;
-  const m = url.match(/[?#&]session_id=([^&#]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
+  try {
+    const parsed = new URL(url);
+    const fromSearch = parsed.searchParams.get(key);
+    if (fromSearch) return fromSearch;
+    return new URLSearchParams(parsed.hash.replace(/^#/, "")).get(key);
+  } catch {
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = url.match(new RegExp(`[?#&]${escapedKey}=([^&#]+)`));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [googleAuthError, setGoogleAuthError] = useState<string | null>(null);
 
-  const exchangeSessionId = useCallback(async (sessionId: string) => {
-    if (processedSessions.has(sessionId)) return;
-    processedSessions.add(sessionId);
+  const exchangeGoogleCode = useCallback(async (authCode: string) => {
+    if (processedAuthCodes.has(authCode)) return;
+    processedAuthCodes.add(authCode);
     try {
-      const res = await api<{ session_token: string; user: User }>("/auth/session", {
+      const res = await api<{ session_token: string; user: User }>("/auth/google/exchange", {
         method: "POST",
-        body: { session_id: sessionId },
+        body: { auth_code: authCode },
         auth: false,
       });
       await saveToken(res.session_token);
       setUser(res.user);
     } catch (e) {
-      console.warn("exchange failed", e);
+      processedAuthCodes.delete(authCode);
+      console.warn("Error intercambiando el código propio de Google:", e);
+      throw e;
     }
   }, []);
 
@@ -95,32 +107,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
 
     (async () => {
-      // First handle deep link session_id (mobile cold start / web mount)
       if (Platform.OS === "web") {
         try {
-          const search = typeof window !== "undefined" ? window.location.search + window.location.hash : "";
-          const sid = extractSessionId(search);
-          if (sid) {
-            await exchangeSessionId(sid);
+          const currentUrl = typeof window !== "undefined" ? window.location.href : "";
+          const authCode = extractQueryValue(currentUrl, "auth_code");
+          const authError = extractQueryValue(currentUrl, "auth_error");
+          if (authCode) {
             try {
-              const url = new URL(window.location.href);
-              url.searchParams.delete("session_id");
-              const cleanHash = url.hash.replace(/[?#&]?session_id=[^&#]+/, "");
-              window.history.replaceState(window.history.state, "", url.pathname + url.search + cleanHash);
-            } catch {}
+              await exchangeGoogleCode(authCode);
+            } catch (error) {
+              setGoogleAuthError(error instanceof Error ? error.message : "No se pudo iniciar sesión con Google");
+            }
+            const url = new URL(window.location.href);
+            url.searchParams.delete("auth_code");
+            url.searchParams.delete("auth_error");
+            window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+          } else if (authError) {
+            setGoogleAuthError(authError);
+            const url = new URL(window.location.href);
+            url.searchParams.delete("auth_error");
+            window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
           }
         } catch {}
       } else {
         try {
-          // Cap Linking.getInitialURL at 1.5s — on some Android devices
+          // Cap Linking.getInitialURL at 1.5s ? on some Android devices
           // this can hang and would block the whole boot sequence.
           const initial = await Promise.race([
             Linking.getInitialURL(),
             new Promise<string | null>((resolve) => setTimeout(() => resolve(null), 1500)),
           ]);
           if (initial) {
-            const sid = extractSessionId(initial);
-            if (sid) await exchangeSessionId(sid);
+            const authCode = extractQueryValue(initial, "auth_code");
+            if (authCode) await exchangeGoogleCode(authCode);
+            const authError = extractQueryValue(initial, "auth_error");
+            if (authError) setGoogleAuthError(authError);
           }
         } catch {}
       }
@@ -130,38 +151,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let sub: any = null;
     if (Platform.OS !== "web") {
       sub = Linking.addEventListener("url", (evt) => {
-        const sid = extractSessionId(evt.url);
-        if (sid) exchangeSessionId(sid);
+        const authCode = extractQueryValue(evt.url, "auth_code");
+        if (authCode) exchangeGoogleCode(authCode).catch(() => {});
+        const authError = extractQueryValue(evt.url, "auth_error");
+        if (authError) setGoogleAuthError(authError);
       });
     }
     return () => {
       mounted = false;
       try { sub?.remove?.(); } catch {}
     };
-  }, [exchangeSessionId, checkExisting]);
+  }, [exchangeGoogleCode, checkExisting]);
 
   const signIn = useCallback(async () => {
+    setGoogleAuthError(null);
     const redirectUrl = Platform.OS === "web"
-      ? (typeof window !== "undefined" ? window.location.origin + "/" : "")
-      : Linking.createURL("");
-    const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+      ? (typeof window !== "undefined" ? `${window.location.origin}/` : "")
+      : Linking.createURL("auth");
+    const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(/\/+$/, "");
+    if (!backendUrl) throw new Error("La dirección del backend no está configurada");
+    const authUrl = `${backendUrl}/api/auth/google/start?redirect_uri=${encodeURIComponent(redirectUrl)}`;
+
     if (Platform.OS === "web") {
       if (typeof window !== "undefined") window.location.href = authUrl;
       return;
     }
+
     const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
-    let url: string | null = null;
-    if (result.type === "success" && (result as any).url) url = (result as any).url;
-    if (!url) {
-      try {
-        url = await Linking.getInitialURL();
-      } catch {}
+
+    if (result.type === "cancel" || result.type === "dismiss") {
+      throw new Error("Inicio de sesión cancelado");
     }
-    if (url) {
-      const sid = extractSessionId(url);
-      if (sid) await exchangeSessionId(sid);
+    if (result.type !== "success" || !result.url) {
+      throw new Error("Google no devolvió el resultado de autenticación");
     }
-  }, [exchangeSessionId]);
+    const authError = extractQueryValue(result.url, "auth_error");
+    if (authError) throw new Error(authError);
+    const authCode = extractQueryValue(result.url, "auth_code");
+    if (!authCode) throw new Error("Google no devolvió un código de inicio de sesión");
+    await exchangeGoogleCode(authCode);
+  }, [exchangeGoogleCode]);
 
   const signOut = useCallback(async () => {
     try { await api("/auth/logout", { method: "POST" }); } catch {}
@@ -223,7 +252,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider value={{
-      user, loading, signIn, signInWithEmail, registerWithEmail,
+      user, loading, googleAuthError, signIn, signInWithEmail, registerWithEmail,
       signInWithApple, signInWithFacebook, signOut, refreshUser, setUser,
     }}>
       {children}

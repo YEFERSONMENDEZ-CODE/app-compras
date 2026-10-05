@@ -10,10 +10,10 @@ import { theme } from "@/src/theme";
 type Mode = "welcome" | "email-login" | "email-register";
 
 export default function LoginScreen() {
-  const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook } = useAuth();
+  const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError } = useAuth();
   const [mode, setMode] = useState<Mode>("welcome");
   const [loading, setLoading] = useState<string | null>(null);
-  const [providers, setProviders] = useState<any>({ google: true, apple: true, email: true, facebook: false });
+  const [providers, setProviders] = useState<any>({ google: false, apple: true, email: true, facebook: false });
   const [appleAvailable, setAppleAvailable] = useState(false);
 
   const [email, setEmail] = useState("");
@@ -177,7 +177,7 @@ export default function LoginScreen() {
           <Text style={styles.title}>Despensa</Text>
           <Text style={styles.subtitle}>Controla tus compras del mes con estilo</Text>
 
-          {err && <Text style={styles.errTextWhite} testID="welcome-error">{err}</Text>}
+          {(err || googleAuthError) && <Text style={styles.errTextWhite} testID="welcome-error">{err || googleAuthError}</Text>}
 
           <Pressable
             testID="email-login-btn"
@@ -188,21 +188,23 @@ export default function LoginScreen() {
             <Text style={styles.primaryDarkText}>Continuar con correo</Text>
           </Pressable>
 
-          <Pressable
-            testID="google-login-button"
-            onPress={doGoogle}
-            disabled={loading === "google"}
-            style={[styles.btn, loading === "google" && { opacity: 0.7 }]}
-          >
-            {loading === "google" ? (
-              <ActivityIndicator color={theme.colors.onSurface} />
-            ) : (
-              <>
-                <Text style={styles.g}>G</Text>
-                <Text style={styles.btnText}>Google</Text>
-              </>
-            )}
-          </Pressable>
+          {providers.google && (
+            <Pressable
+              testID="google-login-button"
+              onPress={doGoogle}
+              disabled={loading === "google"}
+              style={[styles.btn, loading === "google" && { opacity: 0.7 }]}
+            >
+              {loading === "google" ? (
+                <ActivityIndicator color={theme.colors.onSurface} />
+              ) : (
+                <>
+                  <Text style={styles.g}>G</Text>
+                  <Text style={styles.btnText}>Google</Text>
+                </>
+              )}
+            </Pressable>
+          )}
 
           {Platform.OS === "ios" && appleAvailable && (
             <Pressable
