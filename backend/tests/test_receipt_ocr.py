@@ -134,7 +134,7 @@ def test_gemini_scan_returns_structured_items_and_uses_free_flash_lite(monkeypat
     monkeypatch.setattr(server.httpx, "AsyncClient", lambda **_: FakeClient())
     result = asyncio.run(server._scan_receipt_with_gemini(_receipt_image(), "PYG"))
 
-    assert request["url"].endswith("gemini-2.5-flash-lite:generateContent")
+    assert request["url"].endswith("gemini-3.5-flash-lite:generateContent")
     assert request["headers"] == {"x-goog-api-key": "test-api-key"}
     assert request["body"]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "image/jpeg"
     assert result == [{

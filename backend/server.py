@@ -814,7 +814,7 @@ async def _scan_receipt_with_gemini(image_bytes: bytes, currency: str) -> List[D
         async with httpx.AsyncClient(timeout=20) as http:
             response = await http.post(
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-2.5-flash-lite:generateContent",
+                "gemini-3.5-flash-lite:generateContent",
                 headers={"x-goog-api-key": api_key},
                 json=request_body,
             )

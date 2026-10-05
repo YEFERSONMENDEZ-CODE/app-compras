@@ -2,7 +2,7 @@
 
 Receipt scans use the local OCR engine unless `GEMINI_API_KEY` is set. With a
 key configured, the backend sends a downscaled JPEG to Google's
-`gemini-2.5-flash-lite` API and returns extracted item names, quantities, and
+`gemini-3.5-flash-lite` API and returns extracted item names, quantities, and
 unit prices.
 
 To enable the faster cloud scan:
