@@ -3,13 +3,13 @@ import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, Activity
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Plus, Camera, Receipt, ShoppingBasket, TrendingUp } from "lucide-react-native";
-import { theme, CATEGORY_COLORS, CATEGORY_LABEL } from "@/src/theme";
+import { theme } from "@/src/theme";
 import { formatMoney } from "@/src/currency";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 
 type Purchase = {
-  id: string; market_name: string; total: number; currency: string;
+  id: string; name?: string | null; market_name: string; total: number; currency: string;
   date: string; items: any[];
 };
 
@@ -134,13 +134,20 @@ export default function Dashboard() {
                 <View style={styles.rowIcon}>
                   <Receipt color={theme.colors.brand} size={18} />
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.rowTitle}>{p.market_name}</Text>
+                <View style={styles.purchaseContent}>
+                  <Text style={styles.rowTitle}>{p.name || "Compra"}</Text>
                   <Text style={styles.rowSub}>
-                    {new Date(p.date).toLocaleDateString("es-PY", { day: "2-digit", month: "short" })} · {p.items.length} items
+                    {p.market_name} · {new Date(p.date).toLocaleDateString("es-PY", { day: "2-digit", month: "short", year: "numeric" })}
+                  </Text>
+                  <Text style={styles.rowItems} numberOfLines={2}>
+                    {p.items.slice(0, 3).map((item) => item.name).join(", ")}
+                    {p.items.length > 3 ? ` y ${p.items.length - 3} más` : ""}
                   </Text>
                 </View>
-                <Text style={styles.rowAmount}>{formatMoney(p.total, p.currency)}</Text>
+                <View style={styles.amountBlock}>
+                  <Text style={styles.amountLabel}>Gastado</Text>
+                  <Text style={styles.rowAmount}>{formatMoney(p.total, p.currency)}</Text>
+                </View>
               </Pressable>
             ))}
           </View>
@@ -190,12 +197,16 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 16, fontWeight: "700", color: theme.colors.onSurface },
   list: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, overflow: "hidden", borderWidth: 1, borderColor: theme.colors.border },
   row: {
-    flexDirection: "row", alignItems: "center", gap: theme.spacing.md,
-    padding: theme.spacing.md, minHeight: 64, borderBottomWidth: 1, borderBottomColor: theme.colors.divider,
+    flexDirection: "row", alignItems: "flex-start", gap: theme.spacing.md,
+    padding: theme.spacing.md, minHeight: 88, borderBottomWidth: 1, borderBottomColor: theme.colors.divider,
   },
   rowIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandTertiary, alignItems: "center", justifyContent: "center" },
+  purchaseContent: { flex: 1, minWidth: 0 },
   rowTitle: { fontSize: 15, fontWeight: "600", color: theme.colors.onSurface },
   rowSub: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
+  rowItems: { fontSize: 12, color: theme.colors.onSurfaceSecondary, marginTop: 5 },
+  amountBlock: { alignItems: "flex-end", maxWidth: 118 },
+  amountLabel: { fontSize: 10, color: theme.colors.muted, marginBottom: 3 },
   rowAmount: { fontSize: 15, fontWeight: "700", color: theme.colors.onSurface },
   empty: { alignItems: "center", padding: theme.spacing.xxl },
   emptyIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: theme.colors.surfaceTertiary, alignItems: "center", justifyContent: "center", marginBottom: theme.spacing.md },

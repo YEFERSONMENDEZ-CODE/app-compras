@@ -10,6 +10,7 @@ import { currencyByCode } from "@/src/currency";
 
 type Item = { name: string; quantity: string; unit: "un" | "kg"; price: string; category: string };
 type Market = { id: string; name: string; color: string };
+const PURCHASE_NAMES = ["Reposición semanal", "Carnes", "Productos faltantes"];
 
 export default function AddPurchase() {
   const router = useRouter();
@@ -19,6 +20,7 @@ export default function AddPurchase() {
   const [selectedMarket, setSelectedMarket] = useState<string | null>(null);
   const [marketOpen, setMarketOpen] = useState(false);
   const [items, setItems] = useState<Item[]>([{ name: "", quantity: "1", unit: "un", price: "", category: "otros" }]);
+  const [purchaseName, setPurchaseName] = useState(PURCHASE_NAMES[0]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currency, setCurrency] = useState(user?.preferred_currency || "PYG");
@@ -42,6 +44,7 @@ export default function AddPurchase() {
           const p: any = await api(`/purchases/${params.purchaseId}`);
           setSelectedMarket(p.market_id);
           setCurrency(p.currency);
+          setPurchaseName(p.name || PURCHASE_NAMES[0]);
           setItems(
             (p.items || []).map((it: any) => ({
               name: String(it.name || ""),
@@ -59,6 +62,7 @@ export default function AddPurchase() {
       try {
         const data = JSON.parse(params.preload as string);
         if (data.currency) setCurrency(data.currency);
+        if (data.name) setPurchaseName(String(data.name));
         if (Array.isArray(data.items) && data.items.length) {
           setItems(
             data.items.map((it: any) => ({
@@ -95,6 +99,7 @@ export default function AddPurchase() {
       const body = {
         market_id: selectedMarket,
         currency,
+        name: purchaseName.trim() || "Compra",
         items: valid.map((it) => ({
           name: it.name.trim(),
           quantity: parseFloat(it.quantity) || 1,
@@ -176,6 +181,29 @@ export default function AddPurchase() {
               </Pressable>
             ))}
           </View>
+
+          <Text style={styles.label}>Nombre de la compra</Text>
+          <View style={styles.purchaseNameChips}>
+            {PURCHASE_NAMES.map((name) => (
+              <Pressable
+                key={name}
+                onPress={() => setPurchaseName(name)}
+                style={[styles.catChip, purchaseName === name && styles.purchaseNameChipActive]}
+                testID={`purchase-name-${name.toLowerCase().replace(/\s+/g, "-")}`}
+              >
+                <Text style={[styles.catText, purchaseName === name && styles.purchaseNameTextActive]}>{name}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <TextInput
+            testID="purchase-name-input"
+            value={purchaseName}
+            onChangeText={setPurchaseName}
+            placeholder="O escribe un nombre personalizado"
+            placeholderTextColor={theme.colors.muted}
+            style={styles.input}
+            maxLength={60}
+          />
 
           <Text style={styles.label}>Productos</Text>
           {items.map((it, idx) => (
@@ -310,6 +338,9 @@ const styles = StyleSheet.create({
   hint: { padding: 14, color: theme.colors.muted, fontSize: 13 },
   mDot: { width: 10, height: 10, borderRadius: 5 },
   currRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  purchaseNameChips: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 },
+  purchaseNameChipActive: { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brand },
+  purchaseNameTextActive: { color: theme.colors.brand, fontWeight: "700" },
   chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: theme.radius.pill, backgroundColor: theme.colors.surface, borderWidth: 1, borderColor: theme.colors.border },
   chipActive: { backgroundColor: theme.colors.brand, borderColor: theme.colors.brand },
   chipText: { color: theme.colors.onSurface, fontWeight: "600", fontSize: 13 },

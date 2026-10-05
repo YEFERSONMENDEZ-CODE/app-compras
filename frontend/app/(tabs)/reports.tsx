@@ -1,30 +1,35 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, Dimensions } from "react-native";
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, Pressable } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import { PieChart, BarChart } from "react-native-gifted-charts";
+import { ChevronLeft, ChevronRight } from "lucide-react-native";
 import { theme, CATEGORY_COLORS, CATEGORY_LABEL } from "@/src/theme";
 import { formatMoney, formatMoneyCompact } from "@/src/currency";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 
-const W = Dimensions.get("window").width;
-
 export default function ReportsScreen() {
   const { user } = useAuth();
   const [report, setReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
   const currency = user?.preferred_currency || "PYG";
+  const month = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      const now = new Date();
-      const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
       const rep = await api<any>(`/reports/monthly?month=${month}`);
       setReport(rep);
     } catch (e) { console.warn(e); }
     finally { setLoading(false); }
-  }, []);
+  }, [month]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -68,9 +73,28 @@ export default function ReportsScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]} testID="reports-screen">
       <View style={styles.header}>
         <Text style={styles.title}>Reportes</Text>
-        <Text style={styles.subtitle}>
-          {new Date().toLocaleDateString("es-PY", { month: "long", year: "numeric" })}
-        </Text>
+        <View style={styles.monthSelector}>
+          <Pressable
+            accessibilityLabel="Mes anterior"
+            testID="previous-report-month"
+            onPress={() => setSelectedMonth((date) => new Date(date.getFullYear(), date.getMonth() - 1, 1))}
+            style={styles.monthArrow}
+          >
+            <ChevronLeft color={theme.colors.onSurface} size={20} />
+          </Pressable>
+          <Text style={styles.subtitle}>
+            {selectedMonth.toLocaleDateString("es-PY", { month: "long", year: "numeric" })}
+          </Text>
+          <Pressable
+            accessibilityLabel="Mes siguiente"
+            testID="next-report-month"
+            disabled={month === currentMonth}
+            onPress={() => setSelectedMonth((date) => new Date(date.getFullYear(), date.getMonth() + 1, 1))}
+            style={[styles.monthArrow, month === currentMonth && styles.monthArrowDisabled]}
+          >
+            <ChevronRight color={month === currentMonth ? theme.colors.muted : theme.colors.onSurface} size={20} />
+          </Pressable>
+        </View>
       </View>
       <ScrollView contentContainerStyle={styles.scroll}>
         {loading ? (
@@ -159,9 +183,12 @@ export default function ReportsScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.colors.surfaceSecondary },
-  header: { padding: theme.spacing.lg, paddingBottom: theme.spacing.sm },
+  header: { padding: theme.spacing.lg, paddingBottom: theme.spacing.sm, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   title: { fontSize: 26, fontWeight: "800", color: theme.colors.onSurface },
   subtitle: { fontSize: 13, color: theme.colors.muted, marginTop: 2, textTransform: "capitalize" },
+  monthSelector: { flexDirection: "row", alignItems: "center", gap: 4 },
+  monthArrow: { width: 32, height: 32, alignItems: "center", justifyContent: "center", borderRadius: 16, backgroundColor: theme.colors.surface },
+  monthArrowDisabled: { opacity: 0.5 },
   scroll: { padding: theme.spacing.lg, paddingTop: theme.spacing.sm },
   summary: { marginBottom: theme.spacing.lg },
   summaryCard: { backgroundColor: theme.colors.surfaceInverse, borderRadius: theme.radius.md, padding: theme.spacing.xl, marginBottom: theme.spacing.md },

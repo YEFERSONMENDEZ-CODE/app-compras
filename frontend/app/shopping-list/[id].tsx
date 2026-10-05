@@ -14,19 +14,74 @@ type Item = {
   unit: "un" | "kg";
   category: string;
   status: "pending" | "bought" | "unavailable";
+  estimated_price?: number | null;
+  estimated_market_id?: string | null;
+  estimated_market_name?: string | null;
+  estimated_date?: string | null;
   paid_price?: number | null;
   paid_market_id?: string | null;
   paid_market_name?: string | null;
   paid_at?: string | null;
+  purchase_cycle_id?: string | null;
+  imported_purchase_id?: string | null;
   note?: string | null;
 };
 type ShoppingList = { id: string; name: string; currency: string; items: Item[]; created_at: string };
 type Market = { id: string; name: string; color: string };
+type HistoryPrice = {
+  market_id?: string;
+  market_name: string;
+  price: number;
+  currency: string;
+  date: string;
+};
 type HistoryProduct = {
   name: string; category: string; unit: "un" | "kg";
-  prices: { market_id: string; market_name: string; price: number; currency: string; date: string }[];
+  prices: HistoryPrice[] | Record<string, Omit<HistoryPrice, "market_name"> & { market_name?: string }>;
   cheapest_market_id?: string; cheapest_market_name?: string; cheapest_price?: number; cheapest_currency?: string;
 };
+
+function normalizeHistoryPrices(product: HistoryProduct): HistoryPrice[] {
+  if (Array.isArray(product.prices)) return product.prices;
+  if (!product.prices || typeof product.prices !== "object") return [];
+  return Object.entries(product.prices).map(([marketName, price]) => ({
+    ...price,
+    market_name: price.market_name || marketName,
+  }));
+}
+
+function normalizeProductName(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function addHistoryEstimates(
+  list: ShoppingList,
+  history: HistoryProduct[],
+  markets: Market[]
+): ShoppingList {
+  return {
+    ...list,
+    items: list.items.map((item) => {
+      if (item.estimated_price != null) return item;
+      const product = history.find(
+        (entry) => normalizeProductName(entry.name) === normalizeProductName(item.name)
+      );
+      const previous = product && normalizeHistoryPrices(product)
+        .slice()
+        .sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0))[0];
+      if (!product || !previous) return item;
+      return {
+        ...item,
+        estimated_price: previous.price,
+        estimated_market_id: previous.market_id || markets.find(
+          (market) => normalizeProductName(market.name) === normalizeProductName(previous.market_name)
+        )?.id,
+        estimated_market_name: previous.market_name,
+        estimated_date: previous.date,
+      };
+    }),
+  };
+}
 
 export default function ShoppingListDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -36,6 +91,7 @@ export default function ShoppingListDetail() {
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [buyItem, setBuyItem] = useState<Item | null>(null);
+  const [importingPurchases, setImportingPurchases] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -44,8 +100,14 @@ export default function ShoppingListDetail() {
         api<ShoppingList>(`/shopping-lists/${id}`),
         api<Market[]>("/markets"),
       ]);
-      setList(l);
       setMarkets(m);
+      try {
+        const history = await api<HistoryProduct[]>("/products/history");
+        setList(addHistoryEstimates(l, history, m));
+      } catch (error) {
+        console.warn("No se pudo cargar el historial de precios", error);
+        setList(l);
+      }
     } catch (e) { console.warn(e); }
     finally { setLoading(false); }
   }, [id]);
@@ -55,8 +117,44 @@ export default function ShoppingListDetail() {
   const updateItem = async (itemId: string, patch: any) => {
     try {
       const updated = await api<ShoppingList>(`/shopping-lists/${id}/items/${itemId}`, { method: "PUT", body: patch });
-      setList(updated);
+      setList({
+        ...updated,
+        items: updated.items.map((item) => item.id === itemId ? { ...item, ...patch } : item),
+      });
     } catch (e) { console.warn(e); }
+  };
+
+  const openBuySheet = async (item: Item) => {
+    let itemWithHistory = item;
+    if (item.estimated_price == null) {
+      try {
+        const products = await api<HistoryProduct[]>(
+          `/products/history?q=${encodeURIComponent(item.name)}`
+        );
+        const normalizedName = normalizeProductName(item.name);
+        const previousProduct = products.find(
+          (product) => normalizeProductName(product.name) === normalizedName
+        );
+        const previous = previousProduct && normalizeHistoryPrices(previousProduct)
+          .slice()
+          .sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0))[0];
+        if (previous && previousProduct) {
+          itemWithHistory = {
+            ...item,
+            estimated_price: previous.price,
+            estimated_market_id: previous.market_id || markets.find(
+              (market) => market.name.trim().toLocaleLowerCase() === previous.market_name.trim().toLocaleLowerCase()
+            )?.id,
+            estimated_market_name: previous.market_name,
+            estimated_date: previous.date,
+            category: previousProduct.category || item.category,
+          };
+        }
+      } catch (error) {
+        console.warn("No se pudo consultar el precio anterior del producto", error);
+      }
+    }
+    setBuyItem(itemWithHistory);
   };
 
   const deleteItem = async (itemId: string) => {
@@ -79,17 +177,64 @@ export default function ShoppingListDetail() {
     }
   };
 
+  const importBoughtItems = async () => {
+    if (!list || importingPurchases) return;
+    const count = list.items.filter(
+      (item) => item.status === "bought" && !item.imported_purchase_id
+    ).length;
+    if (!count) return;
+
+    const performImport = async () => {
+      setImportingPurchases(true);
+      try {
+        const result = await api<{ list: ShoppingList; imported_count: number }>(
+          `/shopping-lists/${list.id}/complete`,
+          { method: "POST" }
+        );
+        setList(result.list);
+        const message = result.imported_count
+          ? `${result.imported_count} productos se agregaron a tus compras y reportes.`
+          : "Los productos de esta lista ya estaban registrados.";
+        if (Platform.OS === "web" && typeof window !== "undefined") window.alert(message);
+        else Alert.alert("Lista registrada", message);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Intenta de nuevo.";
+        if (Platform.OS === "web" && typeof window !== "undefined") window.alert(message);
+        else Alert.alert("No se pudo registrar", message);
+      } finally {
+        setImportingPurchases(false);
+      }
+    };
+
+    const confirmation = `Se registrarán ${count} productos marcados como comprados. Los pendientes y los que no había se excluirán.`;
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      if (window.confirm(confirmation)) await performImport();
+    } else {
+      Alert.alert("Registrar compras", confirmation, [
+        { text: "Cancelar", style: "cancel" },
+        { text: "COMPRADO", onPress: performImport },
+      ]);
+    }
+  };
+
   const stats = useMemo(() => {
-    if (!list) return { total: 0, bought: 0, unavailable: 0, pending: 0, spent: 0 };
+    if (!list) return { total: 0, bought: 0, unavailable: 0, pending: 0, imported: 0, spent: 0, estimated: 0, difference: 0 };
     const items = list.items;
     const bought = items.filter((i) => i.status === "bought");
     const spent = bought.reduce((s, i) => s + (i.paid_price || 0) * (i.quantity || 1), 0);
+    const estimated = items.reduce((s, i) => s + (i.estimated_price || 0) * (i.quantity || 1), 0);
+    const difference = bought
+      .filter((i) => i.paid_price != null && i.estimated_price != null)
+      .reduce((s, i) => s + (i.paid_price! - i.estimated_price!) * (i.quantity || 1), 0);
     return {
       total: items.length,
       bought: bought.length,
       unavailable: items.filter((i) => i.status === "unavailable").length,
       pending: items.filter((i) => i.status === "pending").length,
+      imported: bought.filter((i) => !!i.imported_purchase_id).length,
       spent,
+      estimated,
+      difference,
     };
   }, [list]);
 
@@ -102,6 +247,12 @@ export default function ShoppingListDetail() {
   }
 
   const currInfo = currencyByCode(list.currency);
+  const boughtNotImported = list.items.filter(
+    (item) => item.status === "bought" && !item.imported_purchase_id
+  );
+  const hasIncompleteBoughtItem = boughtNotImported.some(
+    (item) => !(item.paid_price != null && item.paid_price > 0 && item.paid_market_id)
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]} testID="shopping-list-detail">
@@ -126,6 +277,41 @@ export default function ShoppingListDetail() {
             <Text style={styles.spentLbl}>Gastado</Text>
             <Text style={styles.spentVal}>{formatMoney(stats.spent, list.currency)}</Text>
           </View>
+          <View style={styles.spentRow}>
+            <Text style={styles.spentLbl}>Gasto estimado</Text>
+            <Text style={styles.spentVal}>{formatMoney(stats.estimated, list.currency)}</Text>
+          </View>
+          <View style={styles.spentRow}>
+            <Text style={styles.spentLbl}>Diferencia</Text>
+            <Text style={[styles.spentVal, { color: stats.difference > 0 ? theme.colors.error : theme.colors.success }]}>
+              {stats.difference > 0 ? "+" : ""}{formatMoney(stats.difference, list.currency)}
+            </Text>
+          </View>
+          <Pressable
+            testID="complete-shopping-list"
+            onPress={importBoughtItems}
+            disabled={importingPurchases || boughtNotImported.length === 0 || hasIncompleteBoughtItem}
+            style={[
+              styles.completeBtn,
+              (importingPurchases || boughtNotImported.length === 0 || hasIncompleteBoughtItem) && styles.completeBtnDisabled,
+            ]}
+          >
+            {importingPurchases ? <ActivityIndicator color="#fff" /> : <Check color="#fff" size={18} />}
+            <Text style={styles.completeBtnText}>
+              {importingPurchases
+                ? "Registrando…"
+                : boughtNotImported.length
+                  ? `COMPRADO · Registrar ${boughtNotImported.length} productos`
+                  : stats.imported
+                    ? "COMPRADO · Ya registrado"
+                    : "COMPRADO · Sin productos"}
+            </Text>
+          </Pressable>
+          {hasIncompleteBoughtItem ? (
+            <Text style={styles.completeHint}>Confirma el precio y el mercado de cada producto comprado para registrarlo.</Text>
+          ) : stats.imported > 0 ? (
+            <Text style={styles.completeHint}>{stats.imported} productos ya forman parte del historial.</Text>
+          ) : null}
         </View>
 
         {list.items.length === 0 ? (
@@ -147,12 +333,12 @@ export default function ShoppingListDetail() {
                   if (it.status === "bought") {
                     updateItem(it.id, { status: "pending" });
                   } else {
-                    setBuyItem(it);
+                    openBuySheet(it);
                   }
                 }}
                 onToggleUnavailable={() => updateItem(it.id, { status: it.status === "unavailable" ? "pending" : "unavailable" })}
                 onDelete={() => deleteItem(it.id)}
-                onEditBought={() => setBuyItem(it)}
+                onEditBought={() => openBuySheet(it)}
               />
             ))}
           </View>
@@ -172,7 +358,16 @@ export default function ShoppingListDetail() {
         visible={addOpen}
   onClose={() => setAddOpen(false)}
   listId={list.id}
-  onAdded={(updated: any) => { setList(updated); }}
+  markets={markets}
+  onAdded={async (updated: ShoppingList) => {
+    try {
+      const history = await api<HistoryProduct[]>("/products/history");
+      setList(addHistoryEstimates(updated, history, markets));
+    } catch (error) {
+      console.warn("No se pudo actualizar el estimado del producto", error);
+      setList(updated);
+    }
+  }}
       />
 
       <MarkBoughtSheet
@@ -183,7 +378,16 @@ export default function ShoppingListDetail() {
         onClose={() => setBuyItem(null)}
         onSave={async (patch: any)=> {
           if (!buyItem) return;
-          await updateItem(buyItem.id, { ...patch, status: "bought" });
+          await updateItem(buyItem.id, {
+            ...patch,
+            ...(buyItem.estimated_price != null && {
+              estimated_price: buyItem.estimated_price,
+              estimated_market_id: buyItem.estimated_market_id,
+              estimated_market_name: buyItem.estimated_market_name,
+              estimated_date: buyItem.estimated_date,
+            }),
+            status: "bought",
+          });
           setBuyItem(null);
         }}
       />
@@ -196,6 +400,9 @@ function ListItemRow({ item, currency, onToggleBought, onToggleUnavailable, onDe
   const isBought = item.status === "bought";
   const isUnavail = item.status === "unavailable";
   const catColor = CATEGORY_COLORS[item.category] || "#6B7280";
+  const difference = item.paid_price != null && item.estimated_price != null
+    ? (item.paid_price - item.estimated_price) * (item.quantity || 1)
+    : null;
   return (
     <View style={[styles.itemCard, isBought && styles.itemBought, isUnavail && styles.itemUnavail]} testID={`item-row-${item.id}`}>
       <Pressable onPress={onToggleBought} style={[styles.checkbox, isBought && styles.checkboxOn]} testID={`toggle-bought-${item.id}`}>
@@ -220,6 +427,19 @@ function ListItemRow({ item, currency, onToggleBought, onToggleUnavailable, onDe
             <Edit3 color={theme.colors.brand} size={12} />
           </Pressable>
         )}
+        {isBought && difference != null && (
+          <Text style={[styles.itemDifference, { color: difference > 0 ? theme.colors.error : theme.colors.success }]}>
+            {difference > 0 ? "Más caro" : difference < 0 ? "Más barato" : "Sin diferencia"}
+            {difference !== 0 ? ` · ${difference > 0 ? "+" : ""}${formatMoney(difference, currency)}` : ""}
+          </Text>
+        )}
+        {!isUnavail && item.estimated_price != null && (
+          <View style={styles.estimatedPill}>
+            <Text style={styles.estimatedText}>
+              Anterior: {item.estimated_market_name ? `${item.estimated_market_name} · ` : ""}{formatMoney(item.estimated_price * (item.quantity || 1), currency)}{item.estimated_date ? ` · ${new Date(item.estimated_date).toLocaleDateString("es-PY")}` : ""}
+            </Text>
+          </View>
+        )}
       </View>
       <View style={styles.actions}>
         <Pressable onPress={onToggleUnavailable} style={[styles.actBtn, isUnavail && { backgroundColor: theme.colors.error + "22" }]} testID={`toggle-unavailable-${item.id}`}>
@@ -234,7 +454,7 @@ function ListItemRow({ item, currency, onToggleBought, onToggleUnavailable, onDe
 }
 
 // -----------------------------
-function AddItemSheet({ visible, onClose, listId, onAdded }: any) {
+function AddItemSheet({ visible, onClose, listId, markets, onAdded }: any) {
   const [tab, setTab] = useState<"manual" | "history">("manual");
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
@@ -277,9 +497,23 @@ function AddItemSheet({ visible, onClose, listId, onAdded }: any) {
   const addFromHistory = async (p: HistoryProduct) => {
     setSaving(true);
     try {
+      const previous = normalizeHistoryPrices(p)
+        .sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0))[0] || null;
       const updated = await api(`/shopping-lists/${listId}/items`, {
         method: "POST",
-        body: { name: p.name, quantity: 1, unit: p.unit, category: p.category },
+        body: {
+          name: p.name,
+          quantity: 1,
+          unit: p.unit,
+          category: p.category,
+          status: "pending",
+          estimated_price: previous?.price ?? null,
+          estimated_market_id: previous?.market_id ?? markets.find(
+            (market: Market) => market.name.trim().toLocaleLowerCase() === previous?.market_name.trim().toLocaleLowerCase()
+          )?.id ?? null,
+          estimated_market_name: previous?.market_name ?? null,
+          estimated_date: previous?.date ?? null,
+        },
       });
       onAdded(updated);
       onClose();
@@ -403,13 +637,13 @@ function AddItemSheet({ visible, onClose, listId, onAdded }: any) {
                         <Text style={styles.histName}>{p.name}</Text>
                         <Text style={styles.histCat}>{CATEGORY_LABEL[p.category] || "Otros"}</Text>
                         <View style={styles.priceList}>
-                          {(Array.isArray(p?.prices) ? p.prices : []).map((pr, idx) => (
-                            <View key={pr.market_id || idx} style={[styles.pricePill, idx === 0 && p.prices.length > 1 && styles.pricePillBest]}>
-                              {idx === 0 && p.prices.length > 1 && <Trophy color={theme.colors.success} size={11} />}
-                              <Text style={[styles.priceMkt, idx === 0 && p.prices.length > 1 && { color: theme.colors.success }]}>
+                          {normalizeHistoryPrices(p).map((pr, idx, prices) => (
+                            <View key={pr.market_id || `${pr.market_name}-${idx}`} style={[styles.pricePill, idx === 0 && prices.length > 1 && styles.pricePillBest]}>
+                              {idx === 0 && prices.length > 1 && <Trophy color={theme.colors.success} size={11} />}
+                              <Text style={[styles.priceMkt, idx === 0 && prices.length > 1 && { color: theme.colors.success }]}>
                                 {pr.market_name}
                               </Text>
-                              <Text style={[styles.priceVal, idx === 0 && p.prices.length > 1 && { color: theme.colors.success }]}>
+                              <Text style={[styles.priceVal, idx === 0 && prices.length > 1 && { color: theme.colors.success }]}>
                                 {formatMoney(pr.price, pr.currency)}
                               </Text>
                             </View>
@@ -438,11 +672,11 @@ function MarkBoughtSheet({ item, markets, currency, currencySymbol, onClose, onS
 
   useEffect(() => {
     if (item) {
-      setPrice(item.paid_price != null ? String(item.paid_price) : "");
+      setPrice(item.paid_price != null ? String(item.paid_price) : item.estimated_price != null ? String(item.estimated_price) : "");
       setQty(String(item.quantity));
-      setMarketId(item.paid_market_id || null);
+      setMarketId(item.paid_market_id || markets[0]?.id || null);
     }
-  }, [item]);
+  }, [item, markets]);
 
   if (!item) return null;
 
@@ -467,6 +701,15 @@ function MarkBoughtSheet({ item, markets, currency, currencySymbol, onClose, onS
             <Pressable onPress={onClose}><X color={theme.colors.muted} size={22} /></Pressable>
           </View>
           <Text style={styles.itemNameBig}>{item.name}</Text>
+          {item.estimated_price != null && (
+            <View style={styles.previousPriceBox}>
+              <Text style={styles.previousPriceTitle}>Compra anterior</Text>
+              <Text style={styles.previousPriceText}>
+                {item.estimated_market_name || "Mercado no disponible"} · {formatMoney(item.estimated_price, currency)}
+                {item.estimated_date ? ` · ${new Date(item.estimated_date).toLocaleDateString("es-PY")}` : ""}
+              </Text>
+            </View>
+          )}
 
           <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
             <View style={{ flex: 1 }}>
@@ -522,8 +765,8 @@ function MarkBoughtSheet({ item, markets, currency, currencySymbol, onClose, onS
           <Pressable
             testID="save-bought-btn"
             onPress={doSave}
-            disabled={saving || !(parseFloat(price) > 0)}
-            style={[styles.primary, !(parseFloat(price) > 0) && { opacity: 0.5 }]}
+            disabled={saving || !(parseFloat(price) > 0) || !marketId}
+            style={[styles.primary, (!(parseFloat(price) > 0) || !marketId) && { opacity: 0.5 }]}
           >
             {saving ? <ActivityIndicator color="#fff" /> : (
               <>
@@ -551,6 +794,16 @@ const styles = StyleSheet.create({
   spentRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.1)", paddingTop: 12 },
   spentLbl: { color: "rgba(255,255,255,0.7)", fontSize: 12, fontWeight: "600" },
   spentVal: { color: "#fff", fontSize: 22, fontWeight: "800" },
+  completeBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 14, paddingVertical: 13, paddingHorizontal: 12, borderRadius: theme.radius.md, backgroundColor: theme.colors.brand },
+  completeBtnDisabled: { opacity: 0.48 },
+  completeBtnText: { color: "#fff", fontSize: 13, fontWeight: "800", textAlign: "center" },
+  completeHint: { color: "rgba(255,255,255,0.65)", fontSize: 12, marginTop: 8, textAlign: "center" },
+  estimatedPill: { alignSelf: "flex-start", marginTop: 6, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: theme.colors.brand + "18" },
+  estimatedText: { color: theme.colors.brand, fontSize: 11, fontWeight: "600" },
+  itemDifference: { fontSize: 11, fontWeight: "700", marginTop: 5 },
+  previousPriceBox: { marginTop: 10, padding: 10, borderRadius: theme.radius.md, backgroundColor: theme.colors.surfaceSecondary, borderWidth: 1, borderColor: theme.colors.border },
+  previousPriceTitle: { color: theme.colors.muted, fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
+  previousPriceText: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "600", marginTop: 3 },
   items: { gap: 8 },
   itemCard: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, padding: theme.spacing.md, borderWidth: 1, borderColor: theme.colors.border, minHeight: 64 },
   itemBought: { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brandSecondary },

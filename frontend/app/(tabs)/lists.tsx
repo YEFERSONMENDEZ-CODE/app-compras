@@ -84,6 +84,10 @@ export default function ListsScreen() {
               const total = l.items.length;
               const bought = l.items.filter((i) => i.status === "bought").length;
               const spent = l.items.filter((i) => i.status === "bought").reduce((s, i) => s + (i.paid_price || 0) * (i.quantity || 1), 0);
+              const estimated = l.items.reduce((s, i) => s + (i.estimated_price || 0) * (i.quantity || 1), 0);
+              const difference = l.items
+                .filter((i) => i.status === "bought" && i.paid_price != null && i.estimated_price != null)
+                .reduce((s, i) => s + (i.paid_price - i.estimated_price) * (i.quantity || 1), 0);
               return (
                 <Pressable
                   key={l.id}
@@ -100,8 +104,12 @@ export default function ListsScreen() {
                       {bought}/{total} · {new Date(l.created_at).toLocaleDateString("es-PY", { day: "2-digit", month: "short" })}
                     </Text>
                   </View>
-                  {spent > 0 ? (
-                    <Text style={styles.rowAmount}>{l.currency} {spent.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text>
+                  {spent + estimated > 0 ? (
+                    <View style={styles.rowTotals}>
+                      {estimated > 0 ? <Text style={styles.rowEstimate}>Gasto estimado {l.currency} {estimated.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                      {spent > 0 ? <Text style={styles.rowAmount}>Gastado {l.currency} {spent.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                      {difference !== 0 ? <Text style={difference > 0 ? styles.rowDifferenceUp : styles.rowDifferenceDown}>Diferencia {difference > 0 ? "+" : ""}{l.currency} {difference.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                    </View>
                   ) : null}
                   <ChevronRight color={theme.colors.muted} size={18} />
                 </Pressable>
@@ -164,6 +172,10 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 15, fontWeight: "600", color: theme.colors.onSurface },
   rowSub: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
   rowAmount: { fontSize: 13, fontWeight: "700", color: theme.colors.brand },
+  rowTotals: { alignItems: "flex-end", gap: 2 },
+  rowEstimate: { fontSize: 13, fontWeight: "700", color: theme.colors.onSurface },
+  rowDifferenceUp: { fontSize: 11, fontWeight: "700", color: theme.colors.error },
+  rowDifferenceDown: { fontSize: 11, fontWeight: "700", color: theme.colors.success },
   empty: { alignItems: "center", padding: theme.spacing.xxl, marginTop: 40 },
   emptyIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: theme.colors.surfaceTertiary, alignItems: "center", justifyContent: "center", marginBottom: theme.spacing.md },
   emptyTitle: { fontSize: 16, fontWeight: "700", color: theme.colors.onSurface },

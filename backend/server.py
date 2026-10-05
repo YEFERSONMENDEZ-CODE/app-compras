@@ -124,6 +124,7 @@ class Purchase(BaseModel):
     currency: str = "PYG"
     items: List[PurchaseItem] = []
     total: float = 0
+    name: Optional[str] = None
     note: Optional[str] = None
     date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -132,6 +133,7 @@ class PurchaseCreate(BaseModel):
     market_id: str
     currency: str = "PYG"
     items: List[PurchaseItemCreate]
+    name: Optional[str] = None
     note: Optional[str] = None
     date: Optional[datetime] = None
 
@@ -168,10 +170,16 @@ class ShoppingListItem(BaseModel):
     unit: Literal["un", "kg"] = "un"
     category: Optional[str] = "otros"
     status: Literal["pending", "bought", "unavailable"] = "pending"
+    estimated_price: Optional[float] = None
+    estimated_market_id: Optional[str] = None
+    estimated_market_name: Optional[str] = None
+    estimated_date: Optional[datetime] = None
     paid_price: Optional[float] = None
     paid_market_id: Optional[str] = None
     paid_market_name: Optional[str] = None
     paid_at: Optional[datetime] = None
+    purchase_cycle_id: Optional[str] = None
+    imported_purchase_id: Optional[str] = None
     note: Optional[str] = None
 
 class ShoppingListItemCreate(BaseModel):
@@ -179,6 +187,15 @@ class ShoppingListItemCreate(BaseModel):
     quantity: float = 1
     unit: Literal["un", "kg"] = "un"
     category: Optional[str] = "otros"
+    status: Literal["pending", "bought", "unavailable"] = "pending"
+    estimated_price: Optional[float] = None
+    estimated_market_id: Optional[str] = None
+    estimated_market_name: Optional[str] = None
+    estimated_date: Optional[datetime] = None
+    paid_price: Optional[float] = None
+    paid_market_id: Optional[str] = None
+    paid_market_name: Optional[str] = None
+    paid_at: Optional[datetime] = None
     note: Optional[str] = None
 
 class ShoppingListItemUpdate(BaseModel):
@@ -187,6 +204,10 @@ class ShoppingListItemUpdate(BaseModel):
     unit: Optional[Literal["un", "kg"]] = None
     category: Optional[str] = None
     status: Optional[Literal["pending", "bought", "unavailable"]] = None
+    estimated_price: Optional[float] = None
+    estimated_market_id: Optional[str] = None
+    estimated_market_name: Optional[str] = None
+    estimated_date: Optional[datetime] = None
     paid_price: Optional[float] = None
     paid_market_id: Optional[str] = None
     note: Optional[str] = None
@@ -518,6 +539,7 @@ async def create_purchase(payload: PurchaseCreate, user: Dict[str, Any] = Depend
         currency=payload.currency,
         items=items,
         total=total,
+        name=payload.name.strip() if payload.name and payload.name.strip() else None,
         note=payload.note,
         date=payload.date or datetime.now(timezone.utc),
     )
@@ -548,6 +570,11 @@ async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: Dict[
         "currency": payload.currency,
         "items": [i.dict() for i in items],
         "total": total,
+        "name": (
+            payload.name.strip() if payload.name and payload.name.strip()
+            else None if payload.name is not None
+            else existing.get("name")
+        ),
         "note": payload.note,
         "date": payload.date or existing.get("date"),
     }
@@ -669,9 +696,43 @@ async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_c
         raise HTTPException(status_code=500, detail="Error de la IA al leer la factura")
 
 # ============ SHOPPING LISTS ROUTES ============
+async def _backfill_shopping_list_history(row: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    items = row.get("items", [])
+    missing = [item for item in items if item.get("estimated_price") is None]
+    if not missing:
+        return row
+
+    purchases = await db.purchases.find({"user_id": user_id}, {"_id": 0}).sort("date", -1).to_list(3000)
+    changed = False
+    for item in items:
+        if item.get("estimated_price") is not None:
+            continue
+        item_name = " ".join(str(item.get("name", "")).split()).casefold()
+        for purchase in purchases:
+            previous = next(
+                (entry for entry in purchase.get("items", [])
+                 if " ".join(str(entry.get("name", "")).split()).casefold() == item_name),
+                None,
+            )
+            if previous:
+                item["estimated_price"] = previous.get("price")
+                item["estimated_market_id"] = purchase.get("market_id")
+                item["estimated_market_name"] = purchase.get("market_name")
+                item["estimated_date"] = purchase.get("date")
+                changed = True
+                break
+
+    if changed:
+        await db.shopping_lists.update_one(
+            {"id": row["id"], "user_id": user_id},
+            {"$set": {"items": items}},
+        )
+    return row
+
 @api_router.get("/shopping-lists", response_model=List[ShoppingList])
 async def list_shopping_lists(user: Dict[str, Any] = Depends(get_current_user)):
     rows = await db.shopping_lists.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    rows = [await _backfill_shopping_list_history(row, user["user_id"]) for row in rows]
     return [ShoppingList(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/shopping-lists", response_model=ShoppingList)
@@ -685,6 +746,7 @@ async def get_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_cur
     r = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     if not r:
         raise HTTPException(404, "List not found")
+    r = await _backfill_shopping_list_history(r, user["user_id"])
     return ShoppingList(**cast(Dict[str, Any], r))
 
 @api_router.put("/shopping-lists/{list_id}", response_model=ShoppingList)
@@ -712,7 +774,37 @@ async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, 
     sl = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     if not sl:
         raise HTTPException(404, "List not found")
-    item = ShoppingListItem(**payload.dict())
+
+    data = payload.dict()
+    if data.get("status") == "pending" and data.get("estimated_price") is None:
+        current_name = " ".join(str(data.get("name", "")).split()).casefold()
+        purchases = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
+        for latest_purchase in purchases:
+            history_item = next(
+                (entry for entry in latest_purchase.get("items", [])
+                 if " ".join(str(entry.get("name", "")).split()).casefold() == current_name),
+                None,
+            )
+            if history_item:
+                data["estimated_price"] = history_item.get("price")
+                data["estimated_market_id"] = latest_purchase.get("market_id")
+                data["estimated_market_name"] = latest_purchase.get("market_name")
+                data["estimated_date"] = latest_purchase.get("date")
+                break
+    if data.get("status") == "bought" and not data.get("paid_at"):
+        data["paid_at"] = datetime.now(timezone.utc)
+    if data.get("status") == "bought" and not data.get("purchase_cycle_id"):
+        data["purchase_cycle_id"] = str(uuid.uuid4())
+
+    if data.get("status") != "bought":
+        data["paid_price"] = None
+        data["paid_market_id"] = None
+        data["paid_market_name"] = None
+        data["paid_at"] = None
+        data["purchase_cycle_id"] = None
+        data["imported_purchase_id"] = None
+
+    item = ShoppingListItem(**data)
     await db.shopping_lists.update_one(
         {"id": list_id, "user_id": user["user_id"]},
         {"$push": {"items": item.dict()}},
@@ -732,6 +824,25 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
 
     upd_dict = payload.dict(exclude_unset=True)
 
+    if upd_dict.get("status") == "bought" and items[idx].get("status") != "bought":
+        upd_dict["purchase_cycle_id"] = str(uuid.uuid4())
+        upd_dict["imported_purchase_id"] = None
+    if upd_dict.get("status") == "bought" and items[idx].get("estimated_price") is None:
+        current_name = " ".join(str(items[idx].get("name", "")).split()).casefold()
+        purchases = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
+        for latest_purchase in purchases:
+            history_item = next(
+                (entry for entry in latest_purchase.get("items", [])
+                 if " ".join(str(entry.get("name", "")).split()).casefold() == current_name),
+                None,
+            )
+            if history_item:
+                upd_dict["estimated_price"] = history_item.get("price")
+                upd_dict["estimated_market_id"] = latest_purchase.get("market_id")
+                upd_dict["estimated_market_name"] = latest_purchase.get("market_name")
+                upd_dict["estimated_date"] = latest_purchase.get("date")
+                break
+
     if "paid_market_id" in upd_dict and upd_dict["paid_market_id"]:
         market = await db.markets.find_one({"id": upd_dict["paid_market_id"], "user_id": user["user_id"]}, {"_id": 0})
         if market:
@@ -744,6 +855,8 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
         upd_dict.setdefault("paid_price", None)
         upd_dict.setdefault("paid_market_id", None)
         upd_dict.setdefault("paid_market_name", None)
+        upd_dict["purchase_cycle_id"] = None
+        upd_dict["imported_purchase_id"] = None
 
     for k, v in upd_dict.items():
         items[idx][k] = v
@@ -754,6 +867,117 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
     )
     updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
     return ShoppingList(**cast(Dict[str, Any], updated))
+
+@api_router.post("/shopping-lists/{list_id}/complete")
+async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Import confirmed, priced list items into purchase history exactly once per buy cycle."""
+    user_id = user["user_id"]
+    shopping_list = await db.shopping_lists.find_one(
+        {"id": list_id, "user_id": user_id}, {"_id": 0}
+    )
+    if not shopping_list:
+        raise HTTPException(404, "List not found")
+
+    items = shopping_list.get("items", [])
+    to_import = [
+        item for item in items
+        if item.get("status") == "bought" and not item.get("imported_purchase_id")
+    ]
+    if not to_import:
+        latest = await db.shopping_lists.find_one(
+            {"id": list_id, "user_id": user_id}, {"_id": 0}
+        )
+        return {"list": latest, "purchases": [], "imported_count": 0}
+
+    markets: Dict[str, Dict[str, Any]] = {}
+    for item in to_import:
+        if item.get("paid_price") is None or float(item["paid_price"]) <= 0:
+            raise HTTPException(422, f"Confirma el precio de {item.get('name', 'un producto')} antes de registrar la lista")
+        market_id = item.get("paid_market_id")
+        if not market_id:
+            raise HTTPException(422, f"Selecciona un mercado para {item.get('name', 'un producto')}")
+        if market_id not in markets:
+            market = await db.markets.find_one(
+                {"id": market_id, "user_id": user_id}, {"_id": 0}
+            )
+            if not market:
+                raise HTTPException(422, f"El mercado de {item.get('name', 'un producto')} ya no está disponible")
+            markets[market_id] = market
+
+    # Keep purchases from different markets/days separate; paid_at preserves the actual
+    # purchase month, so a list imported after rollover still appears in its correct report.
+    grouped: Dict[Any, List[Dict[str, Any]]] = {}
+    now = datetime.now(timezone.utc)
+    for item in to_import:
+        paid_at = item.get("paid_at")
+        if not isinstance(paid_at, datetime):
+            paid_at = now
+        if paid_at.tzinfo is None:
+            paid_at = paid_at.replace(tzinfo=timezone.utc)
+        group_key = (item["paid_market_id"], paid_at.date().isoformat())
+        grouped.setdefault(group_key, []).append({**item, "_paid_at": paid_at})
+
+    created: List[Purchase] = []
+    for (market_id, _purchase_day), group in grouped.items():
+        market = markets[market_id]
+        cycles = sorted(
+            item.get("purchase_cycle_id") or item["id"] for item in group
+        )
+        source_key = f"{user_id}:{list_id}:{market_id}:{','.join(cycles)}"
+        purchase_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source_key))
+        purchase_items = [
+            PurchaseItem(
+                name=item["name"],
+                quantity=item.get("quantity", 1),
+                unit=item.get("unit", "un"),
+                price=float(item["paid_price"]),
+                category=item.get("category") or "otros",
+            )
+            for item in group
+        ]
+        purchase = Purchase(
+            id=purchase_id,
+            user_id=user_id,
+            market_id=market_id,
+            market_name=market["name"],
+            currency=shopping_list.get("currency", "PYG"),
+            items=purchase_items,
+            total=sum(
+                entry.price * (entry.quantity if entry.quantity and entry.quantity > 0 else 1)
+                for entry in purchase_items
+            ),
+            name=shopping_list["name"],
+            date=max(item["_paid_at"] for item in group),
+        )
+        # Use Mongo's unique _id as the idempotency key. A retry after interruption
+        # safely reuses an already-written purchase rather than creating a duplicate.
+        document = purchase.dict()
+        document["_id"] = purchase_id
+        await db.purchases.update_one(
+            {"_id": purchase_id, "user_id": user_id},
+            {"$setOnInsert": document},
+            upsert=True,
+        )
+        saved = await db.purchases.find_one(
+            {"_id": purchase_id, "user_id": user_id}, {"_id": 0}
+        )
+        created.append(Purchase(**cast(Dict[str, Any], saved)))
+
+        for item in group:
+            await db.shopping_lists.update_one(
+                {"id": list_id, "user_id": user_id},
+                {"$set": {"items.$[entry].imported_purchase_id": purchase_id}},
+                array_filters=[{
+                    "entry.id": item["id"],
+                    "entry.purchase_cycle_id": item.get("purchase_cycle_id"),
+                    "entry.status": "bought",
+                }],
+            )
+
+    updated = await db.shopping_lists.find_one(
+        {"id": list_id, "user_id": user_id}, {"_id": 0}
+    )
+    return {"list": updated, "purchases": created, "imported_count": len(to_import)}
 
 @api_router.delete("/shopping-lists/{list_id}/items/{item_id}", response_model=ShoppingList)
 async def delete_shopping_list_item(list_id: str, item_id: str, user: Dict[str, Any] = Depends(get_current_user)):
@@ -774,6 +998,7 @@ async def products_history(q: Optional[str] = None, user: Dict[str, Any] = Depen
     products: Dict[str, Any] = {}
     for r in rows:
         market_name = r.get("market_name", "Otro")
+        market_id = r.get("market_id")
         currency = r.get("currency", "PYG")
         date = r.get("date")
         for it in r.get("items", []):
@@ -785,16 +1010,34 @@ async def products_history(q: Optional[str] = None, user: Dict[str, Any] = Depen
                 "name": raw,
                 "category": it.get("category", "otros"),
                 "unit": it.get("unit", "un"),
-                "prices": {},
+                "prices": [],
             })
-            if market_name not in entry["prices"]:
-                entry["prices"][market_name] = {
-                    "price": it.get("price", 0),
-                    "currency": currency,
-                    "date": date,
-                }
 
-    result = list(products.values())
+            price_entry = {
+                "market_id": market_id,
+                "market_name": market_name,
+                "price": it.get("price", 0),
+                "currency": currency,
+                "date": date,
+            }
+
+            if not any(existing.get("market_name") == market_name for existing in entry["prices"]):
+                entry["prices"].append(price_entry)
+
+    result = []
+    for product in products.values():
+        prices = sorted(product["prices"], key=lambda x: (float(x.get("price", 0)) or 0, x.get("market_name") or ""))
+        cheapest = prices[0] if prices else None
+        entry = {
+            **product,
+            "prices": prices,
+            "cheapest_market_id": cheapest.get("market_id") if cheapest else None,
+            "cheapest_market_name": cheapest.get("market_name") if cheapest else None,
+            "cheapest_price": cheapest.get("price") if cheapest else None,
+            "cheapest_currency": cheapest.get("currency") if cheapest else None,
+        }
+        result.append(entry)
+
     if q:
         q_lower = q.lower()
         result = [p for p in result if q_lower in p["name"].lower()]
