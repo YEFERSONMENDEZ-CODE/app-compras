@@ -3,7 +3,7 @@ services:
     name: despensa-web
     runtime: static
     rootDir: frontend
-    buildCommand: npm ci && npx expo export --platform web
+    buildCommand: npx expo export --platform web
     staticPublishPath: dist
     envVars:
       - key: EXPO_PUBLIC_BACKEND_URL
