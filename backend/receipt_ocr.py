@@ -11,6 +11,9 @@ from rapidocr_onnxruntime import RapidOCR
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 20_000_000
+# RapidOCR's detector resizes inputs to this side length internally, but only
+# after receiving a full-size NumPy array. Resize first to bound per-scan memory.
+MAX_OCR_IMAGE_SIDE = 2000
 _PRICE_AT_END = re.compile(
     r"(?P<amount>(?:[$₲]\s*)?\d[\d.,]*)(?:\s*(?:₲|Gs\.?|PYG|USD|EUR|BRL|ARS))?\s*$",
     re.IGNORECASE,
@@ -121,6 +124,10 @@ def scan_receipt_image(image_bytes: bytes, currency: str = "PYG") -> List[Dict[s
             width, height = source.size
             if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
                 raise InvalidReceiptImage("La resolución de la imagen supera el límite permitido.")
+            source.thumbnail(
+                (MAX_OCR_IMAGE_SIDE, MAX_OCR_IMAGE_SIDE),
+                Image.Resampling.LANCZOS,
+            )
             image = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))[:, :, ::-1].copy()
     except InvalidReceiptImage:
         raise

@@ -58,6 +58,29 @@ def test_scan_receipt_image_rejects_invalid_image():
         scan_receipt_image(b"not an image")
 
 
+def test_scan_endpoint_downscales_large_images_before_ocr(monkeypatch):
+    dimensions = {}
+
+    class FakeOCREngine:
+        def __call__(self, image):
+            dimensions["shape"] = image.shape
+            return [], None
+
+    monkeypatch.setattr("receipt_ocr._ocr_engine", lambda: FakeOCREngine())
+    image = Image.new("RGB", (3000, 2400), "white")
+    output = BytesIO()
+    image.save(output, format="PNG")
+    payload = server.OCRRequest(
+        image_base64=base64.b64encode(output.getvalue()).decode("ascii"),
+        currency="PYG",
+    )
+
+    result = asyncio.run(server.scan_receipt(payload, user={"user_id": "test-user"}))
+
+    assert result == {"currency": "PYG", "items": []}
+    assert max(dimensions["shape"][:2]) == 2000
+
+
 def test_scan_endpoint_uses_local_ocr_without_gemini_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     image_base64 = base64.b64encode(_receipt_image()).decode("ascii")
