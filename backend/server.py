@@ -824,7 +824,18 @@ async def _scan_receipt_with_gemini(image_bytes: bytes, currency: str) -> List[D
                 detail="Se alcanzó el límite gratuito de Gemini. Intenta de nuevo más tarde.",
             )
         if response.status_code in (400, 403, 404):
-            logger.error("Gemini rechazó la solicitud de OCR (HTTP %s)", response.status_code)
+            try:
+                error_message = response.json().get("error", {}).get("message", "")
+            except (ValueError, AttributeError):
+                error_message = ""
+            if not isinstance(error_message, str):
+                error_message = ""
+            safe_error_message = error_message.replace(api_key, "[REDACTED]")[:500]
+            logger.error(
+                "Gemini rechazó la solicitud de OCR (HTTP %s): %s",
+                response.status_code,
+                safe_error_message or "sin detalle",
+            )
             raise HTTPException(
                 status_code=503,
                 detail="La configuración gratuita de Gemini no está disponible. Intenta más tarde.",

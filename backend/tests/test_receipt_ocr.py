@@ -192,3 +192,39 @@ def test_gemini_scan_reports_free_quota_exhaustion(monkeypatch):
 
     assert exc.value.status_code == 429
     assert "límite gratuito" in exc.value.detail
+
+
+def test_gemini_scan_logs_bad_request_reason_without_logging_api_key(monkeypatch, caplog):
+    from fastapi import HTTPException
+
+    api_key = "secret-test-api-key"
+    monkeypatch.setenv("GEMINI_API_KEY", api_key)
+
+    class FakeResponse:
+        status_code = 400
+
+        def json(self):
+            return {
+                "error": {
+                    "message": f"Invalid request for key {api_key}: unsupported field",
+                }
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def post(self, _url, **_):
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **_: FakeClient())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(server._scan_receipt_with_gemini(_receipt_image(), "PYG"))
+
+    assert exc.value.status_code == 503
+    assert "[REDACTED]" in caplog.text
+    assert "unsupported field" in caplog.text
+    assert api_key not in caplog.text
