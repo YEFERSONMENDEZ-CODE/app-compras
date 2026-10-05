@@ -9,11 +9,13 @@ import os
 import logging
 import uuid
 import base64
+import json
 import hashlib
 import secrets
 import httpx
 from pathlib import Path
-from pydantic import BaseModel, Field
+from io import BytesIO
+from pydantic import BaseModel, Field, ValidationError
 from typing import List, Optional, Literal, Dict, Any, cast
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
@@ -22,9 +24,19 @@ import jwt
 from jwt import PyJWKClient
 from starlette.concurrency import run_in_threadpool
 if __package__:
-    from .receipt_ocr import InvalidReceiptImage, MAX_IMAGE_BYTES, scan_receipt_image
+    from .receipt_ocr import (
+        InvalidReceiptImage,
+        MAX_IMAGE_BYTES,
+        prepare_receipt_image,
+        scan_receipt_image,
+    )
 else:
-    from receipt_ocr import InvalidReceiptImage, MAX_IMAGE_BYTES, scan_receipt_image
+    from receipt_ocr import (
+        InvalidReceiptImage,
+        MAX_IMAGE_BYTES,
+        prepare_receipt_image,
+        scan_receipt_image,
+    )
 
 # Configuración del Logger
 logger = logging.getLogger("uvicorn")
@@ -138,6 +150,13 @@ class CurrencyUpdate(BaseModel):
 class OCRRequest(BaseModel):
     image_base64: str = Field(..., max_length=(MAX_IMAGE_BYTES * 4 // 3) + 16)
     currency: str = "PYG"
+
+class GeminiReceiptItem(BaseModel):
+    name: str = Field(..., min_length=1, max_length=150)
+    quantity: float = Field(..., gt=0)
+    unit: Literal["un", "kg"] = "un"
+    price: float = Field(..., gt=0)
+    category: str = "otros"
 
 # ============ EMAIL/PASSWORD AUTH MODELS ============
 class RegisterRequest(BaseModel):
@@ -736,7 +755,116 @@ async def monthly_report(month: Optional[str] = None, user: Dict[str, Any] = Dep
         "by_day": by_day,
     }
 
-# ============ OFFLINE OCR ESCANEO DE FACTURAS ============
+# ============ ESCANEO DE FACTURAS ============
+async def _scan_receipt_with_gemini(image_bytes: bytes, currency: str) -> List[Dict[str, Any]]:
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="El escaneo con Gemini no está configurado")
+
+    try:
+        image = await run_in_threadpool(prepare_receipt_image, image_bytes)
+    except InvalidReceiptImage as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    image_buffer = BytesIO()
+    image.save(image_buffer, format="JPEG", quality=85, optimize=True)
+    encoded_image = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+    prompt = (
+        "Lee esta factura de supermercado. Devuelve solo los productos comprados, "
+        "sin subtotal, total, impuestos, pagos ni vuelto. Para cada producto indica "
+        "el nombre, la cantidad, la unidad (usa 'kg' solo si la factura indica kilos; "
+        "en otro caso 'un') y el precio unitario como número. No inventes productos "
+        "ni precios; omite las líneas ilegibles. La moneda de la factura es "
+        f"{currency}. Si una línea muestra cantidad y precio total de línea, divide "
+        "el total por la cantidad para obtener el precio unitario."
+    )
+    request_body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": encoded_image}},
+            ],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "items": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "name": {"type": "STRING"},
+                                "quantity": {"type": "NUMBER"},
+                                "unit": {"type": "STRING", "enum": ["un", "kg"]},
+                                "price": {"type": "NUMBER"},
+                            },
+                            "required": ["name", "quantity", "unit", "price"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+            "maxOutputTokens": 2048,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as http:
+            response = await http.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-2.5-flash-lite:generateContent",
+                headers={"x-goog-api-key": api_key},
+                json=request_body,
+            )
+        if response.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Se alcanzó el límite gratuito de Gemini. Intenta de nuevo más tarde.",
+            )
+        if response.status_code in (400, 403, 404):
+            logger.error("Gemini rechazó la solicitud de OCR (HTTP %s)", response.status_code)
+            raise HTTPException(
+                status_code=503,
+                detail="La configuración gratuita de Gemini no está disponible. Intenta más tarde.",
+            )
+        response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as e:
+        raise HTTPException(
+            status_code=504,
+            detail="Gemini tardó demasiado en leer la factura. Intenta de nuevo.",
+        ) from e
+    except httpx.HTTPStatusError as e:
+        logger.error("Gemini OCR devolvió HTTP %s", e.response.status_code)
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini no pudo procesar la factura en este momento.",
+        ) from e
+    except httpx.RequestError as e:
+        logger.exception("No se pudo conectar con Gemini para procesar la factura")
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo conectar con Gemini. Intenta de nuevo más tarde.",
+        ) from e
+
+    try:
+        response_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(response_text)
+        return [
+            GeminiReceiptItem.model_validate(item).model_dump()
+            for item in parsed["items"]
+        ]
+    except (KeyError, IndexError, TypeError, ValueError, ValidationError) as e:
+        logger.exception("Gemini devolvió una respuesta OCR inválida")
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini no devolvió productos en un formato válido. Intenta otra vez.",
+        ) from e
+
+
 @api_router.post("/receipt/scan")
 async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_current_user)):
     image_b64 = payload.image_base64
@@ -752,13 +880,16 @@ async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_c
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail="La imagen no tiene un formato base64 válido") from e
 
-    try:
-        items = await run_in_threadpool(scan_receipt_image, image_bytes, currency)
-    except InvalidReceiptImage as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        logger.exception("Error procesando factura con OCR local")
-        raise HTTPException(status_code=503, detail="No se pudo procesar la factura con OCR local") from e
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        items = await _scan_receipt_with_gemini(image_bytes, currency)
+    else:
+        try:
+            items = await run_in_threadpool(scan_receipt_image, image_bytes, currency)
+        except InvalidReceiptImage as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("Error procesando factura con OCR local")
+            raise HTTPException(status_code=503, detail="No se pudo procesar la factura con OCR local") from e
 
     return {"currency": currency, "items": items}
 

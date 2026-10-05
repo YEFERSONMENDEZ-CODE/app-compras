@@ -60,6 +60,7 @@ def test_scan_receipt_image_rejects_invalid_image():
 
 def test_scan_endpoint_downscales_large_images_before_ocr(monkeypatch):
     dimensions = {}
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     class FakeOCREngine:
         def __call__(self, image):
@@ -93,3 +94,101 @@ def test_scan_endpoint_uses_local_ocr_without_gemini_key(monkeypatch):
     assert result["items"][0]["name"] == "LECHE"
     assert result["items"][0]["quantity"] == 2
     assert result["items"][0]["price"] == 5000
+
+
+def test_gemini_scan_returns_structured_items_and_uses_free_flash_lite(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+    request = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "text": (
+                                '{"items":[{"name":"LECHE","quantity":2,'
+                                '"unit":"un","price":5000}]}'
+                            )
+                        }]
+                    }
+                }]
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def post(self, url, headers, json):
+            request.update({"url": url, "headers": headers, "body": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **_: FakeClient())
+    result = asyncio.run(server._scan_receipt_with_gemini(_receipt_image(), "PYG"))
+
+    assert request["url"].endswith("gemini-2.5-flash-lite:generateContent")
+    assert request["headers"] == {"x-goog-api-key": "test-api-key"}
+    assert request["body"]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "image/jpeg"
+    assert result == [{
+        "name": "LECHE",
+        "quantity": 2,
+        "unit": "un",
+        "price": 5000,
+        "category": "otros",
+    }]
+
+
+def test_scan_endpoint_uses_gemini_when_configured(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+    called = {}
+
+    async def fake_gemini_scan(image_bytes, currency):
+        called["image_bytes"] = image_bytes
+        called["currency"] = currency
+        return [{"name": "PAN", "quantity": 1, "unit": "un", "price": 1500}]
+
+    monkeypatch.setattr(server, "_scan_receipt_with_gemini", fake_gemini_scan)
+    payload = server.OCRRequest(
+        image_base64=base64.b64encode(_receipt_image()).decode("ascii"),
+        currency="PYG",
+    )
+
+    result = asyncio.run(server.scan_receipt(payload, user={"user_id": "test-user"}))
+
+    assert called["image_bytes"]
+    assert called["currency"] == "PYG"
+    assert result["items"][0]["name"] == "PAN"
+
+
+def test_gemini_scan_reports_free_quota_exhaustion(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+
+    class FakeResponse:
+        status_code = 429
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def post(self, _url, **_):
+            return FakeResponse()
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", lambda **_: FakeClient())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(server._scan_receipt_with_gemini(_receipt_image(), "PYG"))
+
+    assert exc.value.status_code == 429
+    assert "límite gratuito" in exc.value.detail

@@ -119,6 +119,9 @@ export default function ScanReceipt() {
             <View style={[styles.corner, styles.br]} />
           </View>
           <Text style={styles.hint}>Alinea la factura dentro del recuadro</Text>
+          <Text style={styles.privacyHint}>
+            Si Gemini está habilitado, la imagen se envía a Google para analizarla. En el nivel gratuito, Google puede usarla para mejorar sus productos.
+          </Text>
         </View>
 
         <View style={styles.bottom}>
@@ -135,8 +138,8 @@ export default function ScanReceipt() {
       <Modal transparent visible={processing} animationType="fade">
         <View style={styles.loading} testID="ocr-processing-modal">
           <ActivityIndicator size="large" color={theme.colors.brand} />
-          <Text style={styles.loadingTitle}>Extrayendo productos…</Text>
-          <Text style={styles.loadingSub}>Nuestra IA está leyendo tu factura</Text>
+          <Text style={styles.loadingTitle}>Analizando factura…</Text>
+          <Text style={styles.loadingSub}>Identificando productos y precios</Text>
         </View>
       </Modal>
     </View>
@@ -156,6 +159,7 @@ const styles = StyleSheet.create({
   bl: { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 12 },
   br: { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 12 },
   hint: { color: "#fff", marginTop: theme.spacing.lg, fontSize: 14, backgroundColor: "rgba(0,0,0,0.5)", paddingHorizontal: 14, paddingVertical: 8, borderRadius: theme.radius.pill },
+  privacyHint: { color: "#fff", marginTop: 8, fontSize: 11, lineHeight: 15, textAlign: "center", backgroundColor: "rgba(0,0,0,0.65)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, maxWidth: 320 },
   bottom: { flexDirection: "row", alignItems: "center", justifyContent: "space-around", paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.lg },
   smallBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: "rgba(255,255,255,0.15)", alignItems: "center", justifyContent: "center" },
   capture: { width: 80, height: 80, borderRadius: 40, borderWidth: 4, borderColor: "#fff", alignItems: "center", justifyContent: "center" },

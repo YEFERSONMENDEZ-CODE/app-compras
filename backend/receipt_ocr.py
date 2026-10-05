@@ -114,8 +114,8 @@ def parse_receipt_lines(lines: Iterable[str], currency: str = "PYG") -> List[Dic
     return items
 
 
-def scan_receipt_image(image_bytes: bytes, currency: str = "PYG") -> List[Dict[str, Any]]:
-    """Run bundled, CPU-based OCR on a JPEG/PNG and return likely receipt items."""
+def prepare_receipt_image(image_bytes: bytes) -> Image.Image:
+    """Validate and downscale a receipt image before local or remote processing."""
     if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
         raise InvalidReceiptImage("La imagen está vacía o supera el límite permitido.")
 
@@ -128,11 +128,16 @@ def scan_receipt_image(image_bytes: bytes, currency: str = "PYG") -> List[Dict[s
                 (MAX_OCR_IMAGE_SIDE, MAX_OCR_IMAGE_SIDE),
                 Image.Resampling.LANCZOS,
             )
-            image = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))[:, :, ::-1].copy()
+            return ImageOps.exif_transpose(source).convert("RGB")
     except InvalidReceiptImage:
         raise
     except Exception as e:
         raise InvalidReceiptImage("El archivo no es una imagen compatible válida.") from e
+
+
+def scan_receipt_image(image_bytes: bytes, currency: str = "PYG") -> List[Dict[str, Any]]:
+    """Run bundled, CPU-based OCR on a JPEG/PNG and return likely receipt items."""
+    image = np.asarray(prepare_receipt_image(image_bytes))[:, :, ::-1].copy()
     if image.size == 0:
         raise InvalidReceiptImage("El archivo no es una imagen JPEG o PNG válida.")
 
