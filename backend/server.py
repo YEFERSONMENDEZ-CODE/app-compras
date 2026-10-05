@@ -6,11 +6,9 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-import json
 import uuid
 import base64
 import httpx
-import google.generativeai as genai
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any, cast
@@ -18,8 +16,11 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from jwt import PyJWKClient
-import google.generativeai as genai
-from google.oauth2.credentials import Credentials
+from starlette.concurrency import run_in_threadpool
+if __package__:
+    from .receipt_ocr import InvalidReceiptImage, MAX_IMAGE_BYTES, scan_receipt_image
+else:
+    from receipt_ocr import InvalidReceiptImage, MAX_IMAGE_BYTES, scan_receipt_image
 
 # Configuración del Logger
 logger = logging.getLogger("uvicorn")
@@ -31,17 +32,6 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'test_database')]
-
-# Configuración Gemini API Key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
-if GEMINI_API_KEY.startswith("AQ."):
-    # Soporte para tokens de proyectos Google Cloud / AI Studio (AQ...)
-    credentials = Credentials(token=GEMINI_API_KEY)
-    genai.configure(credentials=credentials)
-else:
-    # Soporte para claves de API estándar (AIzaSy...)
-    genai.configure(api_key=GEMINI_API_KEY)
 
 # Configuración Apple / Facebook
 APPLE_AUDIENCES = os.environ.get(
@@ -141,7 +131,7 @@ class CurrencyUpdate(BaseModel):
     currency: str
 
 class OCRRequest(BaseModel):
-    image_base64: str
+    image_base64: str = Field(..., max_length=(MAX_IMAGE_BYTES * 4 // 3) + 16)
     currency: str = "PYG"
 
 # ============ EMAIL/PASSWORD AUTH MODELS ============
@@ -639,7 +629,7 @@ async def monthly_report(month: Optional[str] = None, user: Dict[str, Any] = Dep
         "by_day": by_day,
     }
 
-# ============ OCR / GEMINI ESCANEO DE FACTURAS ============
+# ============ OFFLINE OCR ESCANEO DE FACTURAS ============
 @api_router.post("/receipt/scan")
 async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_current_user)):
     image_b64 = payload.image_base64
@@ -648,52 +638,22 @@ async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_c
     if not image_b64:
         raise HTTPException(status_code=400, detail="Imagen no proporcionada")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=500, 
-            detail="La clave GEMINI_API_KEY no está configurada en el archivo .env"
-        )
-
     try:
-        genai.configure(api_key=api_key)  # type: ignore
-
         if "," in image_b64:
             image_b64 = image_b64.split(",", 1)[1]
+        image_bytes = base64.b64decode(image_b64, validate=True)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="La imagen no tiene un formato base64 válido") from e
 
-        image_bytes = base64.b64decode(image_b64)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        prompt = f"""
-        Analiza esta imagen de factura/ticket y extrae los ítems comprados.
-        Devuelve EXCLUSIVAMENTE un objeto JSON válido con esta estructura exacta (sin formato markdown ni texto explicativo):
-        {{
-          "currency": "{currency}",
-          "items": [
-            {{
-              "name": "Nombre del producto",
-              "quantity": 1,
-              "unit": "un",
-              "price": 5000,
-              "category": "otros"
-            }}
-          ]
-        }}
-        """
-
-        response = model.generate_content([
-            {"mime_type": "image/jpeg", "data": image_bytes},
-            prompt
-        ])
-
-        clean_text = (response.text or "").strip().replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(clean_text)
-
-        return parsed
-
+    try:
+        items = await run_in_threadpool(scan_receipt_image, image_bytes, currency)
+    except InvalidReceiptImage as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Error procesando escaneo con Gemini: {e}")
-        raise HTTPException(status_code=500, detail="Error de la IA al leer la factura")
+        logger.exception("Error procesando factura con OCR local")
+        raise HTTPException(status_code=503, detail="No se pudo procesar la factura con OCR local") from e
+
+    return {"currency": currency, "items": items}
 
 # ============ SHOPPING LISTS ROUTES ============
 async def _backfill_shopping_list_history(row: Dict[str, Any], user_id: str) -> Dict[str, Any]:
