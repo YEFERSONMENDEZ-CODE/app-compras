@@ -1,17 +1,39 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Alert, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Plus, Camera, Receipt, ShoppingBasket, TrendingUp } from "lucide-react-native";
+import { Plus, Camera, Receipt, ShoppingBasket, TrendingUp, Share2 } from "lucide-react-native";
 import { theme } from "@/src/theme";
 import { formatMoney } from "@/src/currency";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { shareToWhatsApp } from "@/src/whatsapp";
 
 type Purchase = {
   id: string; name?: string | null; market_name: string; total: number; currency: string;
-  date: string; items: any[];
+  date: string; items: { name: string; quantity?: number; unit?: string; price?: number }[];
 };
+
+function purchaseShareMessage(purchase: Purchase): string {
+  const date = new Date(purchase.date).toLocaleDateString("es-PY", {
+    day: "2-digit", month: "long", year: "numeric",
+  });
+  const lines = [
+    `🛍️ *${purchase.name || "Compra"}*`,
+    `🏪 ${purchase.market_name}`,
+    `📅 ${date}`,
+    "",
+    "*Productos:*",
+    ...purchase.items.map((item) => {
+      const quantity = item.quantity || 1;
+      const amount = item.price != null ? ` — ${formatMoney(item.price * quantity, purchase.currency)}` : "";
+      return `• ${item.name} (${quantity} ${item.unit === "kg" ? "kg" : "un"})${amount}`;
+    }),
+    "",
+    `*Total gastado:* ${formatMoney(purchase.total, purchase.currency)}`,
+  ];
+  return lines.join("\n");
+}
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -48,6 +70,17 @@ export default function Dashboard() {
   const itemCount = report?.item_count || 0;
 
   const monthName = new Date().toLocaleDateString("es-PY", { month: "long", year: "numeric" });
+
+  const sharePurchase = async (purchase: Purchase) => {
+    try {
+      await shareToWhatsApp(purchaseShareMessage(purchase));
+    } catch (error) {
+      console.warn("No se pudo compartir la compra por WhatsApp", error);
+      const message = "No se pudo abrir WhatsApp para compartir la compra.";
+      if (Platform.OS === "web" && typeof window !== "undefined") window.alert(message);
+      else Alert.alert("Error al compartir", message);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]} testID="dashboard-screen">
@@ -125,30 +158,42 @@ export default function Dashboard() {
         ) : (
           <View style={styles.list}>
             {purchases.slice(0, 10).map((p) => (
-              <Pressable
+              <View
                 key={p.id}
                 testID={`purchase-row-${p.id}`}
-                onPress={() => router.push({ pathname: "/add-purchase", params: { purchaseId: p.id } })}
-                style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+                style={styles.row}
               >
-                <View style={styles.rowIcon}>
-                  <Receipt color={theme.colors.brand} size={18} />
-                </View>
-                <View style={styles.purchaseContent}>
-                  <Text style={styles.rowTitle}>{p.name || "Compra"}</Text>
-                  <Text style={styles.rowSub}>
-                    {p.market_name} · {new Date(p.date).toLocaleDateString("es-PY", { day: "2-digit", month: "short", year: "numeric" })}
-                  </Text>
-                  <Text style={styles.rowItems} numberOfLines={2}>
-                    {p.items.slice(0, 3).map((item) => item.name).join(", ")}
-                    {p.items.length > 3 ? ` y ${p.items.length - 3} más` : ""}
-                  </Text>
-                </View>
-                <View style={styles.amountBlock}>
-                  <Text style={styles.amountLabel}>Gastado</Text>
-                  <Text style={styles.rowAmount}>{formatMoney(p.total, p.currency)}</Text>
-                </View>
-              </Pressable>
+                <Pressable
+                  onPress={() => router.push({ pathname: "/add-purchase", params: { purchaseId: p.id } })}
+                  style={({ pressed }) => [styles.purchaseMain, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={styles.rowIcon}>
+                    <Receipt color={theme.colors.brand} size={18} />
+                  </View>
+                  <View style={styles.purchaseContent}>
+                    <Text style={styles.rowTitle}>{p.name || "Compra"}</Text>
+                    <Text style={styles.rowSub}>
+                      {p.market_name} · {new Date(p.date).toLocaleDateString("es-PY", { day: "2-digit", month: "short", year: "numeric" })}
+                    </Text>
+                    <Text style={styles.rowItems} numberOfLines={2}>
+                      {p.items.slice(0, 3).map((item) => item.name).join(", ")}
+                      {p.items.length > 3 ? ` y ${p.items.length - 3} más` : ""}
+                    </Text>
+                  </View>
+                  <View style={styles.amountBlock}>
+                    <Text style={styles.amountLabel}>Gastado</Text>
+                    <Text style={styles.rowAmount}>{formatMoney(p.total, p.currency)}</Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={`Compartir ${p.name || "compra"} por WhatsApp`}
+                  testID={`share-purchase-${p.id}`}
+                  onPress={() => sharePurchase(p)}
+                  style={({ pressed }) => [styles.shareBtn, pressed && { opacity: 0.6 }]}
+                >
+                  <Share2 color="#25D366" size={19} />
+                </Pressable>
+              </View>
             ))}
           </View>
         )}
@@ -196,10 +241,9 @@ const styles = StyleSheet.create({
   sectionHeader: { marginBottom: theme.spacing.md },
   sectionTitle: { fontSize: 16, fontWeight: "700", color: theme.colors.onSurface },
   list: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, overflow: "hidden", borderWidth: 1, borderColor: theme.colors.border },
-  row: {
-    flexDirection: "row", alignItems: "flex-start", gap: theme.spacing.md,
-    padding: theme.spacing.md, minHeight: 88, borderBottomWidth: 1, borderBottomColor: theme.colors.divider,
-  },
+  row: { flexDirection: "row", alignItems: "center", minHeight: 88, borderBottomWidth: 1, borderBottomColor: theme.colors.divider },
+  purchaseMain: { flex: 1, flexDirection: "row", alignItems: "flex-start", gap: theme.spacing.md, padding: theme.spacing.md },
+  shareBtn: { width: 40, height: 44, alignItems: "center", justifyContent: "center", marginRight: 8 },
   rowIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandTertiary, alignItems: "center", justifyContent: "center" },
   purchaseContent: { flex: 1, minWidth: 0 },
   rowTitle: { fontSize: 15, fontWeight: "600", color: theme.colors.onSurface },

@@ -6,8 +6,9 @@ import { ShoppingBasket, Mail, Lock, User as UserIcon, Eye, EyeOff, ArrowLeft } 
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import { theme } from "@/src/theme";
-
+import * as WebBrowser from "expo-web-browser";
 type Mode = "welcome" | "email-login" | "email-register";
+WebBrowser.maybeCompleteAuthSession();
 
 export default function LoginScreen() {
   const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError } = useAuth();
@@ -22,6 +23,7 @@ export default function LoginScreen() {
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  
   useEffect(() => {
     api<any>("/auth/providers", { auth: false }).then(setProviders).catch(() => {});
     if (Platform.OS === "ios") {

@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.emergent.monthlyshop.aq7qrl",
@@ -22,9 +21,12 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#059669"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.emergent.monthlyshop.aq7qrl",
-      "permissions": ["android.permission.CAMERA", "android.permission.READ_MEDIA_IMAGES"]
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -54,10 +56,18 @@
           "photosPermission": "Permitir elegir fotos de facturas"
         }
       ],
-      "expo-apple-authentication"
+      "expo-image",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d80a3fee-fbc3-4edc-81a5-f040924b192c"
+      }
     }
   }
 }

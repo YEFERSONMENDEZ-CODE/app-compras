@@ -10,7 +10,7 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/auth";
 
 LogBox.ignoreAllLogs(true);
-SplashScreen.preventAutoHideAsync();
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function AuthGate() {
   const { user, loading } = useAuth();
@@ -19,10 +19,20 @@ function AuthGate() {
 
   useEffect(() => {
     if (loading) return;
-    const inAuthGroup = segments[0] === "login";
-    if (!user && !inAuthGroup) {
+
+    // Oculta el splash screen tan pronto como la autenticación determine el estado
+    SplashScreen.hideAsync().catch(() => {});
+
+    const currentRoute = segments[0];
+    const allowedAuthenticatedRoutes = ["(tabs)", "add-purchase", "scan-receipt", "shopping-list", "index"];
+    const inAuthRoute = currentRoute === "login";
+    const inAllowedAuthenticatedRoute = allowedAuthenticatedRoutes.includes(currentRoute ?? "");
+
+    if (!user && !inAuthRoute) {
+      // Si no hay usuario y no está en login -> Redirigir a login
       router.replace("/login");
-    } else if (user && inAuthGroup) {
+    } else if (user && !inAllowedAuthenticatedRoute) {
+      // Si hay usuario autenticado y entra a una ruta no permitida, devolverlo a la pantalla principal
       router.replace("/(tabs)");
     }
   }, [user, loading, segments]);
@@ -43,18 +53,24 @@ export default function RootLayout() {
   const [loaded, error] = useIconFonts();
   const [fontsTimedOut, setFontsTimedOut] = useState(false);
 
-  // Hard cap: if icon fonts don't finish loading in 4s (Expo Go on slow
-  // networks can hang on the jsdelivr CDN), boot the app anyway. Icons
-  // will tofu but the app will NOT get stuck on splash forever.
+  // Límite de 3 segundos para la descarga de fuentes de iconos
   useEffect(() => {
-    const t = setTimeout(() => setFontsTimedOut(true), 4000);
+    const t = setTimeout(() => setFontsTimedOut(true), 3000);
     return () => clearTimeout(t);
   }, []);
 
+  // Límite máximo de 4 segundos para liberar la pantalla de carga (Splash Screen)
+  // aunque el backend en Render esté tardando en despertar.
   useEffect(() => {
+    const forceHideTimer = setTimeout(() => {
+      SplashScreen.hideAsync().catch(() => {});
+    }, 4000);
+
     if (loaded || error || fontsTimedOut) {
       SplashScreen.hideAsync().catch(() => {});
     }
+
+    return () => clearTimeout(forceHideTimer);
   }, [loaded, error, fontsTimedOut]);
 
   if (!loaded && !error && !fontsTimedOut) return null;

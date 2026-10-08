@@ -2,10 +2,11 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Modal, TextInput, KeyboardAvoidingView, Platform, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { ArrowLeft, Plus, Trash2, Check, X, ShoppingCart, PackageX, Store, Search, RotateCcw, Trophy, Edit3 } from "lucide-react-native";
+import { ArrowLeft, Plus, Trash2, Check, X, ShoppingCart, PackageX, Store, Search, RotateCcw, Trophy, Edit3, Share2 } from "lucide-react-native";
 import { theme, CATEGORY_COLORS, CATEGORY_LABEL, CATEGORIES } from "@/src/theme";
 import { formatMoney, currencyByCode } from "@/src/currency";
 import { api } from "@/src/api";
+import { createShoppingListShareMessage, shareToWhatsApp } from "@/src/whatsapp";
 
 type Item = {
   id: string;
@@ -177,6 +178,18 @@ export default function ShoppingListDetail() {
     }
   };
 
+  const shareList = async () => {
+    if (!list) return;
+    try {
+      await shareToWhatsApp(createShoppingListShareMessage(list));
+    } catch (error) {
+      console.warn("No se pudo compartir la lista por WhatsApp", error);
+      const message = "No se pudo abrir WhatsApp para compartir la lista.";
+      if (Platform.OS === "web" && typeof window !== "undefined") window.alert(message);
+      else Alert.alert("Error al compartir", message);
+    }
+  };
+
   const importBoughtItems = async () => {
     if (!list || importingPurchases) return;
     const count = list.items.filter(
@@ -261,6 +274,9 @@ export default function ShoppingListDetail() {
           <ArrowLeft color={theme.colors.onSurface} size={24} />
         </Pressable>
         <Text style={styles.title} numberOfLines={1}>{list.name}</Text>
+        <Pressable onPress={shareList} accessibilityLabel="Compartir lista por WhatsApp" testID="share-shopping-list">
+          <Share2 color="#25D366" size={21} />
+        </Pressable>
         <Pressable onPress={deleteList} testID="delete-list-btn">
           <Trash2 color={theme.colors.error} size={22} />
         </Pressable>

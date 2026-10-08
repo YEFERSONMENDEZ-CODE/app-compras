@@ -1,11 +1,12 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Modal, TextInput, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Modal, TextInput, KeyboardAvoidingView, Platform, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Plus, ListChecks, ChevronRight, Check, X, ShoppingCart } from "lucide-react-native";
+import { Plus, ListChecks, Check, X, ShoppingCart, Share2 } from "lucide-react-native";
 import { theme } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { createShoppingListShareMessage, shareToWhatsApp } from "@/src/whatsapp";
 
 type ShoppingList = {
   id: string;
@@ -51,6 +52,17 @@ export default function ListsScreen() {
     finally { setCreating(false); }
   };
 
+  const shareList = async (list: ShoppingList) => {
+    try {
+      await shareToWhatsApp(createShoppingListShareMessage(list));
+    } catch (error) {
+      console.warn("No se pudo compartir la lista por WhatsApp", error);
+      const message = "No se pudo abrir WhatsApp para compartir la lista.";
+      if (Platform.OS === "web" && typeof window !== "undefined") window.alert(message);
+      else Alert.alert("Error al compartir", message);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]} testID="lists-screen">
       <View style={styles.header}>
@@ -88,31 +100,50 @@ export default function ListsScreen() {
               const difference = l.items
                 .filter((i) => i.status === "bought" && i.paid_price != null && i.estimated_price != null)
                 .reduce((s, i) => s + (i.paid_price - i.estimated_price) * (i.quantity || 1), 0);
+              const pending = l.items.filter((item) => item.status === "pending").length;
+              const purchased = bought > 0 && pending === 0 &&
+                l.items.filter((item) => item.status === "bought").every((item) => !!item.imported_purchase_id);
+              const listStatus = purchased ? "Comprada" : bought > 0 ? "En progreso" : "Pendiente";
+              const listStatusStyle = purchased ? styles.statusPurchased : bought > 0 ? styles.statusInProgress : styles.statusPending;
               return (
-                <Pressable
+                <View
                   key={l.id}
                   testID={`list-row-${l.id}`}
-                  onPress={() => router.push(`/shopping-list/${l.id}`)}
-                  style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+                  style={styles.row}
                 >
-                  <View style={styles.rowIcon}>
-                    <ListChecks color={theme.colors.brand} size={20} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.rowTitle}>{l.name}</Text>
-                    <Text style={styles.rowSub}>
-                      {bought}/{total} · {new Date(l.created_at).toLocaleDateString("es-PY", { day: "2-digit", month: "short" })}
-                    </Text>
-                  </View>
-                  {spent + estimated > 0 ? (
-                    <View style={styles.rowTotals}>
-                      {estimated > 0 ? <Text style={styles.rowEstimate}>Gasto estimado {l.currency} {estimated.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
-                      {spent > 0 ? <Text style={styles.rowAmount}>Gastado {l.currency} {spent.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
-                      {difference !== 0 ? <Text style={difference > 0 ? styles.rowDifferenceUp : styles.rowDifferenceDown}>Diferencia {difference > 0 ? "+" : ""}{l.currency} {difference.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                  <Pressable
+                    onPress={() => router.push(`/shopping-list/${l.id}`)}
+                    style={({ pressed }) => [styles.rowMain, pressed && { opacity: 0.7 }]}
+                  >
+                    <View style={styles.rowIcon}>
+                      <ListChecks color={theme.colors.brand} size={20} />
                     </View>
-                  ) : null}
-                  <ChevronRight color={theme.colors.muted} size={18} />
-                </Pressable>
+                    <View style={styles.rowInfo}>
+                      <Text style={styles.rowTitle}>{l.name}</Text>
+                      <Text style={styles.rowSub}>
+                        {bought}/{total} · {new Date(l.created_at).toLocaleDateString("es-PY", { day: "2-digit", month: "short" })}
+                      </Text>
+                      <View style={[styles.statusBadge, listStatusStyle]}>
+                        <Text style={styles.statusText}>{listStatus}</Text>
+                      </View>
+                      {spent + estimated > 0 ? (
+                        <View style={styles.rowTotals}>
+                          {estimated > 0 ? <Text style={styles.rowEstimate}>Gasto estimado {l.currency} {estimated.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                          {spent > 0 ? <Text style={styles.rowAmount}>Gastado {l.currency} {spent.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                          {difference !== 0 ? <Text style={difference > 0 ? styles.rowDifferenceUp : styles.rowDifferenceDown}>Diferencia {difference > 0 ? "+" : ""}{l.currency} {difference.toLocaleString("es-PY", { maximumFractionDigits: 0 })}</Text> : null}
+                        </View>
+                      ) : null}
+                    </View>
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel={`Compartir ${l.name} por WhatsApp`}
+                    testID={`share-list-${l.id}`}
+                    onPress={() => shareList(l)}
+                    style={({ pressed }) => [styles.shareBtn, pressed && { opacity: 0.6 }]}
+                  >
+                    <Share2 color="#25D366" size={19} />
+                  </Pressable>
+                </View>
               );
             })}
           </View>
@@ -167,13 +198,21 @@ const styles = StyleSheet.create({
   addBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: theme.colors.brand, alignItems: "center", justifyContent: "center" },
   scroll: { padding: theme.spacing.lg, paddingTop: 0 },
   list: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, overflow: "hidden", borderWidth: 1, borderColor: theme.colors.border },
-  row: { flexDirection: "row", alignItems: "center", padding: theme.spacing.md, minHeight: 64, gap: theme.spacing.md, borderBottomWidth: 1, borderBottomColor: theme.colors.divider },
+  row: { flexDirection: "row", alignItems: "center", minHeight: 64, gap: 4, borderBottomWidth: 1, borderBottomColor: theme.colors.divider },
+  rowMain: { flex: 1, flexDirection: "row", alignItems: "flex-start", padding: theme.spacing.md, minHeight: 64, gap: theme.spacing.md },
+  rowInfo: { flex: 1, minWidth: 0, flexShrink: 1 },
   rowIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandTertiary, alignItems: "center", justifyContent: "center" },
+  shareBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center", marginRight: 8 },
+  statusBadge: { alignSelf: "flex-start", borderRadius: theme.radius.pill, paddingHorizontal: 8, paddingVertical: 3, marginTop: 5 },
+  statusPending: { backgroundColor: theme.colors.surfaceTertiary },
+  statusInProgress: { backgroundColor: "#FEF3C7" },
+  statusPurchased: { backgroundColor: theme.colors.brandTertiary },
+  statusText: { color: theme.colors.onSurface, fontSize: 10, fontWeight: "700" },
   rowTitle: { fontSize: 15, fontWeight: "600", color: theme.colors.onSurface },
   rowSub: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
   rowAmount: { fontSize: 13, fontWeight: "700", color: theme.colors.brand },
-  rowTotals: { alignItems: "flex-end", gap: 2 },
-  rowEstimate: { fontSize: 13, fontWeight: "700", color: theme.colors.onSurface },
+  rowTotals: { alignItems: "flex-start", gap: 2, marginTop: 8, maxWidth: "100%" },
+  rowEstimate: { fontSize: 12, fontWeight: "700", color: theme.colors.onSurface },
   rowDifferenceUp: { fontSize: 11, fontWeight: "700", color: theme.colors.error },
   rowDifferenceDown: { fontSize: 11, fontWeight: "700", color: theme.colors.success },
   empty: { alignItems: "center", padding: theme.spacing.xxl, marginTop: 40 },

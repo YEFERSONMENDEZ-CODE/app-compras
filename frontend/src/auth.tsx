@@ -70,35 +70,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const checkExisting = useCallback(async () => {
-    let t: string | null = null;
+    console.log("1. [AUTH] Iniciando comprobación de sesión...");
     try {
-      // Race SecureStore/localStorage read against a 2s timeout so a
-      // stuck native module can never keep the splash spinner alive.
-      t = await Promise.race([
+      console.log("2. [AUTH] Obteniendo token de almacenamiento local...");
+      const t = await Promise.race([
         getToken(),
-        new Promise<string | null>((resolve) => setTimeout(() => resolve(null), 2000)),
+        new Promise<string | null>((resolve) => setTimeout(() => resolve(null), 1000)),
       ]);
-    } catch {}
-    if (!t) {
-      setLoading(false);
-      return;
-    }
-    try {
-      // Also cap the /auth/me call at 6s
-      const me = await Promise.race([
-        api<User>("/auth/me"),
-        new Promise<User>((_, reject) => setTimeout(() => reject(new Error("timeout")), 6000)),
-      ]);
-      setUser(me);
-    } catch (e: any) {
-      // Only clear the token when the server explicitly says the session
-      // is invalid (401). Timeouts and other transient errors must not
-      // log the user out — retry on next app open.
-      const msg = String(e?.message || "");
-      if (msg.includes("HTTP 401") || msg.toLowerCase().includes("invalid session")) {
-        try { await clearToken(); } catch {}
+      console.log("3. [AUTH] Token:", t ? "Encontrado" : "No existe");
+
+      if (t) {
+        console.log("4. [AUTH] Verificando usuario con el backend...");
+        const me = await Promise.race([
+          api<User>("/auth/me"),
+          new Promise<User>((_, reject) => setTimeout(() => reject(new Error("Timeout backend")), 2500)),
+        ]);
+        setUser(me);
+        console.log("5. [AUTH] Usuario validado:", me.email);
       }
+    } catch (e: any) {
+      console.log("6. [AUTH] Excepción durante verificación:", e?.message || e);
     } finally {
+      console.log("7. [AUTH] Apagando pantalla de carga (setLoading -> false)");
       setLoading(false);
     }
   }, []);
@@ -131,8 +124,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch {}
       } else {
         try {
-          // Cap Linking.getInitialURL at 1.5s ? on some Android devices
-          // this can hang and would block the whole boot sequence.
           const initial = await Promise.race([
             Linking.getInitialURL(),
             new Promise<string | null>((resolve) => setTimeout(() => resolve(null), 1500)),
