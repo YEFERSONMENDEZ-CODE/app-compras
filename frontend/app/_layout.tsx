@@ -28,14 +28,11 @@ function AuthGate() {
     const inAuthRoute = currentRoute === "login";
     const inAllowedAuthenticatedRoute = allowedAuthenticatedRoutes.includes(currentRoute ?? "");
 
-    if (!user && !inAuthRoute) {
-      // Si no hay usuario y no está en login -> Redirigir a login
-      router.replace("/login");
-    } else if (user && !inAllowedAuthenticatedRoute) {
+    if (user && !inAllowedAuthenticatedRoute && !inAuthRoute) {
       // Si hay usuario autenticado y entra a una ruta no permitida, devolverlo a la pantalla principal
       router.replace("/(tabs)");
     }
-  }, [user, loading, segments]);
+  }, [user, loading, segments, router]);
 
   return (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#FFFFFF" } }}>

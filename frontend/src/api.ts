@@ -1,5 +1,6 @@
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
+import { localApi } from "./localStore";
 
 const KEY = "despensa_token";
 
@@ -32,11 +33,13 @@ export async function api<T = any>(
   path: string,
   opts: { method?: string; body?: any; auth?: boolean } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (opts.auth !== false) {
-    const t = await getToken();
-    if (t) headers["Authorization"] = `Bearer ${t}`;
+  const token = opts.auth === false ? null : await getToken();
+  if (!token && opts.auth !== false && !path.startsWith("/receipt/")) {
+    return localApi<T>(path, opts);
   }
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts.auth !== false && token) headers.Authorization = "Bearer " + token;
   const res = await fetch(`${BASE_URL}/api${path}`, {
     method: opts.method || "GET",
     headers,

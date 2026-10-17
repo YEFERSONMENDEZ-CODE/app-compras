@@ -3,6 +3,8 @@ import { Platform } from "react-native";
 import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { api, saveToken, getToken, clearToken } from "./api";
+import { exportLocalDatabase } from "./localStore";
+import { storage } from "./utils/storage";
 
 try { WebBrowser.maybeCompleteAuthSession(); } catch {}
 
@@ -13,6 +15,7 @@ export type User = {
   picture?: string;
   preferred_currency: string;
 };
+export type AuthMode = "guest" | "authenticated" | "syncing";
 
 type AuthContextValue = {
   user: User | null;
@@ -26,11 +29,61 @@ type AuthContextValue = {
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
   setUser: (u: User | null) => void;
+  mode: AuthMode;
+  syncError: string | null;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const processedAuthCodes = new Set<string>();
+const guestUser: User = {
+  user_id: "local_guest",
+  email: "",
+  name: "Modo invitado",
+  preferred_currency: "PYG",
+};
+
+async function migrateLocalData(userId: string) {
+  const migratedRaw = await storage.getItem<string>("despensa_migrated_users", "[]");
+  let migratedUsers: string[] = [];
+  if (migratedRaw) {
+    try {
+      const parsed = JSON.parse(migratedRaw);
+      if (Array.isArray(parsed)) migratedUsers = parsed.filter((value): value is string => typeof value === "string");
+    } catch {
+      migratedUsers = [];
+    }
+  }
+  if (migratedUsers.includes(userId)) return;
+  const local = await exportLocalDatabase();
+  const marketIds = new Map<string, string>();
+  for (const market of local.markets) {
+    const created = await api<any>("/markets", {
+      method: "POST",
+      body: { name: market.name, color: market.color },
+    });
+    marketIds.set(market.id, created.id);
+  }
+  for (const purchase of local.purchases) {
+    await api("/purchases", {
+      method: "POST",
+      body: { ...purchase, id: undefined, market_id: marketIds.get(purchase.market_id) || undefined },
+    });
+  }
+  for (const list of local.shoppingLists) {
+    const created = await api<any>("/shopping-lists", {
+      method: "POST",
+      body: { name: list.name, currency: list.currency },
+    });
+    for (const item of list.items || []) {
+      await api(`/shopping-lists/${created.id}/items`, {
+        method: "POST",
+        body: { ...item, id: undefined },
+      });
+    }
+  }
+  await storage.setItem("despensa_migrated_users", JSON.stringify([...migratedUsers, userId]));
+}
 
 function extractQueryValue(url: string, key: string): string | null {
   if (!url) return null;
@@ -50,6 +103,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [googleAuthError, setGoogleAuthError] = useState<string | null>(null);
+  const [mode, setMode] = useState<AuthMode>("guest");
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  const completeLogin = useCallback(async (nextUser: User) => {
+    setSyncError(null);
+    setMode("syncing");
+    try {
+      await migrateLocalData(nextUser.user_id);
+      setUser(nextUser);
+      setMode("authenticated");
+    } catch (error) {
+      setUser(nextUser);
+      setMode("authenticated");
+      setSyncError(error instanceof Error ? error.message : "No se pudieron sincronizar los datos locales");
+    }
+  }, []);
 
   const exchangeGoogleCode = useCallback(async (authCode: string) => {
     if (processedAuthCodes.has(authCode)) return;
@@ -61,13 +130,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         auth: false,
       });
       await saveToken(res.session_token);
-      setUser(res.user);
+      await completeLogin(res.user);
     } catch (e) {
       processedAuthCodes.delete(authCode);
       console.warn("Error intercambiando el código propio de Google:", e);
       throw e;
     }
-  }, []);
+  }, [completeLogin]);
 
   const checkExisting = useCallback(async () => {
     console.log("1. [AUTH] Iniciando comprobación de sesión...");
@@ -86,10 +155,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           new Promise<User>((_, reject) => setTimeout(() => reject(new Error("Timeout backend")), 2500)),
         ]);
         setUser(me);
+        setMode("authenticated");
         console.log("5. [AUTH] Usuario validado:", me.email);
+      } else {
+        setUser(guestUser);
+        setMode("guest");
       }
     } catch (e: any) {
       console.log("6. [AUTH] Excepción durante verificación:", e?.message || e);
+      setUser(guestUser);
+      setMode("guest");
     } finally {
       console.log("7. [AUTH] Apagando pantalla de carga (setLoading -> false)");
       setLoading(false);
@@ -186,7 +261,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     try { await api("/auth/logout", { method: "POST" }); } catch {}
     await clearToken();
-    setUser(null);
+    setUser(guestUser);
+    setMode("guest");
   }, []);
 
   const signInWithEmail = useCallback(async (email: string, password: string) => {
@@ -194,16 +270,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       method: "POST", body: { email, password }, auth: false,
     });
     await saveToken(res.session_token);
-    setUser(res.user);
-  }, []);
+    await completeLogin(res.user);
+  }, [completeLogin]);
 
   const registerWithEmail = useCallback(async (email: string, password: string, name?: string) => {
     const res = await api<{ session_token: string; user: User }>("/auth/register", {
       method: "POST", body: { email, password, name }, auth: false,
     });
     await saveToken(res.session_token);
-    setUser(res.user);
-  }, []);
+    await completeLogin(res.user);
+  }, [completeLogin]);
 
   const signInWithApple = useCallback(async () => {
     const AppleAuth = await import("expo-apple-authentication");
@@ -223,28 +299,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       auth: false,
     });
     await saveToken(res.session_token);
-    setUser(res.user);
-  }, []);
+    await completeLogin(res.user);
+  }, [completeLogin]);
 
   const signInWithFacebook = useCallback(async (accessToken: string) => {
     const res = await api<{ session_token: string; user: User }>("/auth/facebook", {
       method: "POST", body: { access_token: accessToken }, auth: false,
     });
     await saveToken(res.session_token);
-    setUser(res.user);
-  }, []);
+    await completeLogin(res.user);
+  }, [completeLogin]);
 
   const refreshUser = useCallback(async () => {
     try {
       const me = await api<User>("/auth/me");
       setUser(me);
+      setMode("authenticated");
     } catch {}
   }, []);
 
   return (
     <AuthContext.Provider value={{
       user, loading, googleAuthError, signIn, signInWithEmail, registerWithEmail,
-      signInWithApple, signInWithFacebook, signOut, refreshUser, setUser,
+      signInWithApple, signInWithFacebook, signOut, refreshUser, setUser, mode, syncError,
     }}>
       {children}
     </AuthContext.Provider>

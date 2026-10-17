@@ -7,11 +7,13 @@ import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import { theme } from "@/src/theme";
 import * as WebBrowser from "expo-web-browser";
-type Mode = "welcome" | "email-login" | "email-register";
+import { useLocalSearchParams } from "expo-router";
+type Mode = "welcome" | "email-login" | "email-register" | "forgot";
 WebBrowser.maybeCompleteAuthSession();
 
 export default function LoginScreen() {
   const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError } = useAuth();
+  const params = useLocalSearchParams<{ reset_token?: string }>();
   const [mode, setMode] = useState<Mode>("welcome");
   const [loading, setLoading] = useState<string | null>(null);
   const [providers, setProviders] = useState<any>({ google: false, apple: true, email: true, facebook: false });
@@ -22,6 +24,7 @@ export default function LoginScreen() {
   const [name, setName] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const resetToken = typeof params.reset_token === "string" ? params.reset_token : "";
 
   
   useEffect(() => {
@@ -59,11 +62,21 @@ export default function LoginScreen() {
   };
 
   const doEmail = async () => {
-    if (!email.trim() || !password) { showError("Completa email y contraseña"); return; }
+    if (!email.trim() && mode !== "forgot") { showError("Completa tu correo"); return; }
+    if (mode !== "forgot" && !password) { showError("Completa email y contraseña"); return; }
     if (mode === "email-register" && password.length < 6) { showError("Mínimo 6 caracteres"); return; }
+    if (mode === "forgot" && resetToken && password.length < 6) { showError("Mínimo 6 caracteres"); return; }
     setLoading("email");
     try {
-      if (mode === "email-register") await registerWithEmail(email.trim(), password, name.trim() || undefined);
+      if (mode === "forgot" && resetToken) {
+        await api("/auth/password-reset/confirm", { method: "POST", body: { token: resetToken, password } , auth: false });
+        setMode("email-login");
+        setPassword("");
+        showError("Contraseña actualizada. Ya puedes iniciar sesión.");
+      } else if (mode === "forgot") {
+        await api("/auth/password-reset/request", { method: "POST", body: { email: email.trim() }, auth: false });
+        showError("Si el correo existe, recibirás instrucciones para recuperar tu cuenta.");
+      } else if (mode === "email-register") await registerWithEmail(email.trim(), password, name.trim() || undefined);
       else await signInWithEmail(email.trim(), password);
     } catch (e: any) { showError(e.message || "Error"); }
     finally { setLoading(null); }
@@ -72,6 +85,7 @@ export default function LoginScreen() {
   // ---------- Email form view ----------
   if (mode !== "welcome") {
     const isRegister = mode === "email-register";
+    const isForgot = mode === "forgot";
     return (
       <SafeAreaView style={styles.emailBg} edges={["top", "bottom"]} testID="email-auth-screen">
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
@@ -83,13 +97,12 @@ export default function LoginScreen() {
             <View style={styles.logoSmall}>
               <ShoppingBasket color="#fff" size={22} />
             </View>
-            <Text style={styles.emailTitle}>{isRegister ? "Crear cuenta" : "Iniciar sesión"}</Text>
+            <Text style={styles.emailTitle}>{isRegister ? "Crear cuenta" : isForgot ? (resetToken ? "Nueva contraseña" : "Recuperar cuenta") : "Iniciar sesión"}</Text>
             <Text style={styles.emailSub}>
-              {isRegister ? "Regístrate con tu correo" : "Ingresa con tu correo y contraseña"}
+              {isRegister ? "Regístrate con tu correo" : isForgot ? (resetToken ? "Elegí una contraseña nueva" : "Te enviaremos un enlace de recuperación") : "Ingresa con tu correo y contraseña"}
             </Text>
 
-            {isRegister && (
-              <View style={styles.inputBox}>
+            {isRegister && <View style={styles.inputBox}>
                 <UserIcon color={theme.colors.muted} size={18} />
                 <TextInput
                   testID="name-input"
@@ -100,9 +113,8 @@ export default function LoginScreen() {
                   style={styles.input}
                   autoCapitalize="words"
                 />
-              </View>
-            )}
-            <View style={styles.inputBox}>
+              </View>}
+            {(!isForgot || !resetToken) && <View style={styles.inputBox}>
               <Mail color={theme.colors.muted} size={18} />
               <TextInput
                 testID="email-input"
@@ -115,8 +127,8 @@ export default function LoginScreen() {
                 keyboardType="email-address"
                 autoComplete="email"
               />
-            </View>
-            <View style={styles.inputBox}>
+            </View>}
+            {(!isForgot || resetToken) && <View style={styles.inputBox}>
               <Lock color={theme.colors.muted} size={18} />
               <TextInput
                 testID="password-input"
@@ -131,22 +143,22 @@ export default function LoginScreen() {
               <Pressable onPress={() => setShowPw((s) => !s)} testID="toggle-pw-btn">
                 {showPw ? <EyeOff color={theme.colors.muted} size={18} /> : <Eye color={theme.colors.muted} size={18} />}
               </Pressable>
-            </View>
+            </View>}
 
             {err && <Text style={styles.errText} testID="email-error">{err}</Text>}
 
             <Pressable
-              testID={isRegister ? "register-submit-btn" : "login-submit-btn"}
+              testID={isRegister ? "register-submit-btn" : isForgot ? "password-reset-submit-btn" : "login-submit-btn"}
               onPress={doEmail}
               disabled={loading === "email"}
               style={[styles.primaryBtn, loading === "email" && { opacity: 0.6 }]}
             >
               {loading === "email"
                 ? <ActivityIndicator color="#fff" />
-                : <Text style={styles.primaryText}>{isRegister ? "Crear cuenta" : "Ingresar"}</Text>}
+                : <Text style={styles.primaryText}>{isRegister ? "Crear cuenta" : isForgot ? (resetToken ? "Guardar contraseña" : "Enviar enlace") : "Ingresar"}</Text>}
             </Pressable>
 
-            <Pressable
+            {!isForgot && !resetToken && <Pressable
               onPress={() => setMode(isRegister ? "email-login" : "email-register")}
               style={styles.switchLink}
               testID="switch-mode-btn"
@@ -154,7 +166,12 @@ export default function LoginScreen() {
               <Text style={styles.switchText}>
                 {isRegister ? "¿Ya tienes cuenta? Inicia sesión" : "¿No tienes cuenta? Regístrate"}
               </Text>
-            </Pressable>
+            </Pressable>}
+            {!isRegister && !isForgot && (
+              <Pressable onPress={() => setMode("forgot")} style={styles.switchLink} testID="forgot-password-btn">
+                <Text style={styles.switchText}>¿Olvidaste tu contraseña?</Text>
+              </Pressable>
+            )}
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
