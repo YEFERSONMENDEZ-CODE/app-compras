@@ -21,6 +21,8 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 import bcrypt
 import jwt
+from pymongo import ASCENDING
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from jwt import PyJWKClient
 from starlette.concurrency import run_in_threadpool
 if __package__:
@@ -59,6 +61,10 @@ _google_jwks = PyJWKClient("https://www.googleapis.com/oauth2/v3/certs", cache_k
 FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '')
 GOOGLE_OAUTH_WEB_REDIRECT = "https://despensa-web.onrender.com/"
 GOOGLE_OAUTH_APP_REDIRECT = "frontend://auth"
+GOOGLE_OAUTH_LOCAL_REDIRECTS = {
+    "http://localhost:8081/",
+    "http://127.0.0.1:8081/",
+}
 GOOGLE_OAUTH_CALLBACK_DEFAULT = "https://app-compras-backend.onrender.com/api/auth/google/callback"
 
 # Inicialización FastAPI
@@ -168,6 +174,13 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class PasswordResetRequest(BaseModel):
+    email: str
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(..., min_length=20, max_length=256)
+    password: str
+
 class AppleAuthRequest(BaseModel):
     identity_token: str
     name: Optional[str] = None
@@ -178,6 +191,12 @@ class FacebookAuthRequest(BaseModel):
 
 class GoogleCodeExchange(BaseModel):
     auth_code: str = Field(..., min_length=20, max_length=256)
+
+class HouseholdCreate(BaseModel):
+    name: str = Field(default="Mi hogar", min_length=1, max_length=80)
+
+class HouseholdInviteCreate(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
 
 # ============ SHOPPING LISTS MODELS ============
 class ShoppingListItem(BaseModel):
@@ -246,6 +265,53 @@ class ShoppingListUpdate(BaseModel):
     currency: Optional[str] = None
 
 # ============ AUTH HELPERS ============
+_household_indexes_ready = False
+
+async def _ensure_household_indexes() -> None:
+    """Install the uniqueness constraints that back household membership invariants."""
+    global _household_indexes_ready
+    if _household_indexes_ready:
+        return
+    await db.household_memberships.create_index("user_id", unique=True)
+    await db.household_memberships.create_index("household_id")
+    await db.household_invitations.create_index(
+        [("household_id", ASCENDING), ("email", ASCENDING)], unique=True
+    )
+    await db.households.create_index("owner_user_id", unique=True)
+    _household_indexes_ready = True
+
+async def _accessible_user_ids(user: Dict[str, Any]) -> List[str]:
+    """Return the authenticated user's own data scope plus their one household member."""
+    user_id = str(user["user_id"])
+    membership = await db.household_memberships.find_one({"user_id": user_id}, {"_id": 0})
+    if not membership:
+        return [user_id]
+
+    household = await db.households.find_one(
+        {"id": membership.get("household_id")}, {"_id": 0}
+    )
+    if not household:
+        logger.error("Household membership points to a missing household")
+        raise HTTPException(503, "El espacio familiar no está disponible")
+
+    memberships = await db.household_memberships.find(
+        {"household_id": household["id"]}, {"_id": 0}
+    ).to_list(3)
+    member_ids = [str(row["user_id"]) for row in memberships]
+    if (
+        len(member_ids) not in (1, 2)
+        or len(set(member_ids)) != len(member_ids)
+        or user_id not in member_ids
+        or household.get("owner_user_id") not in member_ids
+    ):
+        logger.error("Household membership invariant failed")
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    return member_ids
+
+def _user_scope(user_ids: List[str], **filters: Any) -> Dict[str, Any]:
+    """Build a data query that always limits records to the active household."""
+    return {**filters, "user_id": {"$in": user_ids}}
+
 async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -275,6 +341,34 @@ def _verify_password(pw: str, hashed: str) -> bool:
 
 def _norm_email(email: str) -> str:
     return email.strip().lower()
+
+async def _send_password_reset_email(email: str, token: str) -> bool:
+    resend_key = os.environ.get("RESEND_API_KEY", "").strip()
+    frontend_url = os.environ.get("FRONTEND_PUBLIC_URL", GOOGLE_OAUTH_WEB_REDIRECT).rstrip("/")
+    sender = os.environ.get("EMAIL_FROM", "Despensa <onboarding@resend.dev>").strip()
+    if not resend_key:
+        logger.warning("Password reset requested but RESEND_API_KEY is not configured")
+        return False
+    reset_url = f"{frontend_url}/login?{urlencode({'reset_token': token})}"
+    async with httpx.AsyncClient(timeout=15) as http:
+        response = await http.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            json={
+                "from": sender,
+                "to": [email],
+                "subject": "Restablecer contraseña de Despensa",
+                "html": (
+                    "<p>Recibimos una solicitud para restablecer tu contraseña.</p>"
+                    f'<p><a href="{reset_url}">Crear una nueva contraseña</a></p>'
+                    "<p>Este enlace vence en 30 minutos. Si no lo solicitaste, ignora este mensaje.</p>"
+                ),
+            },
+        )
+    if response.status_code >= 300:
+        logger.error("Password reset email provider rejected request: status=%s", response.status_code)
+        return False
+    return True
 
 async def _issue_session(user_id: str) -> str:
     token = f"sess_{uuid.uuid4().hex}{uuid.uuid4().hex}"
@@ -337,7 +431,7 @@ def _google_oauth_redirect_targets() -> set[str]:
         GOOGLE_OAUTH_WEB_REDIRECT,
         GOOGLE_OAUTH_APP_REDIRECT,
     ]
-    return {target.strip() for target in targets if target.strip()}
+    return {target.strip() for target in targets if target.strip()} | GOOGLE_OAUTH_LOCAL_REDIRECTS
 
 
 def _append_auth_query(url: str, **params: str) -> str:
@@ -513,6 +607,46 @@ async def auth_login(payload: LoginRequest):
     token = await _issue_session(user["user_id"])
     return SessionResponse(session_token=token, user=_user_public(user))
 
+@api_router.post("/auth/password-reset/request")
+async def request_password_reset(payload: PasswordResetRequest):
+    email = _norm_email(payload.email)
+    user = await db.users.find_one({"email": email, "password_hash": {"$exists": True}}, {"_id": 0})
+    if user:
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        await db.password_reset_tokens.delete_many({"email": email})
+        await db.password_reset_tokens.insert_one({
+            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+            "email": email,
+            "expires_at": now + timedelta(minutes=30),
+            "created_at": now,
+        })
+        await _send_password_reset_email(email, token)
+    return {"message": "Si existe una cuenta con ese correo, recibirás instrucciones para restablecer la contraseña."}
+
+@api_router.post("/auth/password-reset/confirm")
+async def confirm_password_reset(payload: PasswordResetConfirm):
+    if len(payload.password) < 6:
+        raise HTTPException(400, "La contraseña debe tener al menos 6 caracteres")
+    if len(payload.password.encode("utf-8")) > 72:
+        raise HTTPException(400, "Contraseña demasiado larga")
+    token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    reset = await db.password_reset_tokens.find_one_and_delete({
+        "token_hash": token_hash,
+        "expires_at": {"$gt": now},
+    })
+    if not reset:
+        raise HTTPException(400, "El enlace de recuperación es inválido o venció")
+    result = await db.users.update_one(
+        {"email": reset["email"]},
+        {"$set": {"password_hash": _hash_password(payload.password)}},
+    )
+    if result.modified_count != 1:
+        raise HTTPException(404, "La cuenta no está disponible")
+    await db.user_sessions.delete_many({"user_id": (await db.users.find_one({"email": reset["email"]}, {"_id": 0}))["user_id"]})
+    return {"message": "Contraseña actualizada. Ya puedes iniciar sesión."}
+
 @api_router.post("/auth/apple", response_model=SessionResponse)
 async def auth_apple(payload: AppleAuthRequest):
     try:
@@ -589,10 +723,346 @@ async def update_currency(payload: CurrencyUpdate, user: Dict[str, Any] = Depend
     user["preferred_currency"] = payload.currency
     return _user_public(user)
 
+# ============ HOUSEHOLDS ============
+async def _household_state(user: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = str(user["user_id"])
+    membership = await db.household_memberships.find_one({"user_id": user_id}, {"_id": 0})
+    pending: List[Dict[str, Any]] = []
+
+    if not membership:
+        invitations = await db.household_invitations.find(
+            {"email": _norm_email(str(user.get("email", ""))), "status": "pending"},
+            {"_id": 0},
+        ).sort("created_at", -1).to_list(50)
+        for invitation in invitations:
+            household = await db.households.find_one(
+                {"id": invitation["household_id"]}, {"_id": 0}
+            )
+            owner = await db.users.find_one(
+                {"user_id": invitation["invited_by_user_id"]}, {"_id": 0}
+            )
+            if household and owner:
+                pending.append({
+                    "id": invitation["id"],
+                    "household_name": household.get("name", "Mi hogar"),
+                    "invited_by": owner.get("name") or owner.get("email", ""),
+                    "created_at": invitation["created_at"],
+                })
+        return {"household": None, "pending_invitations": pending}
+
+    household = await db.households.find_one(
+        {"id": membership["household_id"]}, {"_id": 0}
+    )
+    if not household:
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    memberships = await db.household_memberships.find(
+        {"household_id": household["id"]}, {"_id": 0}
+    ).to_list(3)
+    member_ids = [str(row["user_id"]) for row in memberships]
+    users = await db.users.find({"user_id": {"$in": member_ids}}, {"_id": 0}).to_list(3)
+    users_by_id = {str(row["user_id"]): row for row in users}
+    if len(users_by_id) != len(member_ids):
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    members = [
+        {
+            "user_id": member_id,
+            "name": users_by_id[member_id].get("name") or users_by_id[member_id].get("email", ""),
+            "email": users_by_id[member_id].get("email", ""),
+            "role": next(row["role"] for row in memberships if row["user_id"] == member_id),
+        }
+        for member_id in member_ids
+    ]
+    if membership["role"] == "owner":
+        invites = await db.household_invitations.find(
+            {"household_id": household["id"], "status": "pending"}, {"_id": 0}
+        ).sort("created_at", -1).to_list(50)
+    else:
+        invites = []
+    return {
+        "household": {
+            "id": household["id"],
+            "name": household.get("name", "Mi hogar"),
+            "role": membership["role"],
+            "members": members,
+            "pending_invitations": [
+                {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
+                for row in invites
+            ],
+        },
+        "pending_invitations": [],
+    }
+
+@api_router.get("/household")
+async def get_household(user: Dict[str, Any] = Depends(get_current_user)):
+    return await _household_state(user)
+
+@api_router.post("/household")
+async def create_household(
+    payload: HouseholdCreate = HouseholdCreate(),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    await _ensure_household_indexes()
+    household_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                existing = await db.household_memberships.find_one(
+                    {"user_id": user["user_id"]}, {"_id": 0}, session=session
+                )
+                if existing:
+                    raise HTTPException(409, "Ya perteneces a un espacio familiar")
+                await db.households.insert_one({
+                    "id": household_id,
+                    "name": payload.name.strip(),
+                    "owner_user_id": user["user_id"],
+                    "member_count": 1,
+                    "created_at": now,
+                }, session=session)
+                await db.household_memberships.insert_one({
+                    "user_id": user["user_id"],
+                    "household_id": household_id,
+                    "role": "owner",
+                    "joined_at": now,
+                }, session=session)
+    except HTTPException:
+        raise
+    except DuplicateKeyError as exc:
+        raise HTTPException(409, "Ya perteneces a un espacio familiar") from exc
+    except PyMongoError as exc:
+        logger.exception("No se pudo crear el espacio familiar")
+        raise HTTPException(503, "No se pudo crear el espacio familiar") from exc
+    return await _household_state(user)
+
+@api_router.post("/household/invitations")
+async def invite_to_household(
+    payload: HouseholdInviteCreate,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    await _ensure_household_indexes()
+    email = _norm_email(payload.email)
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(400, "Correo inválido")
+    if email == _norm_email(str(user.get("email", ""))):
+        raise HTTPException(400, "No puedes invitarte a ti mismo")
+    membership = await db.household_memberships.find_one(
+        {"user_id": user["user_id"]}, {"_id": 0}
+    )
+    if not membership or membership.get("role") != "owner":
+        raise HTTPException(403, "Solo el propietario puede invitar")
+    household = await db.households.find_one(
+        {"id": membership["household_id"]}, {"_id": 0}
+    )
+    if not household:
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    if household.get("member_count") != 1:
+        raise HTTPException(409, "El espacio familiar ya tiene dos integrantes")
+    existing_member = await db.household_memberships.find_one(
+        {"user_id": (await db.users.find_one({"email": email}, {"_id": 0}) or {}).get("user_id")},
+        {"_id": 0},
+    )
+    if existing_member:
+        raise HTTPException(409, "Esa cuenta ya pertenece a un espacio familiar")
+
+    now = datetime.now(timezone.utc)
+    invitation = await db.household_invitations.find_one_and_update(
+        {"household_id": household["id"], "email": email},
+        {"$set": {
+            "id": str(uuid.uuid4()),
+            "invited_by_user_id": user["user_id"],
+            "status": "pending",
+            "created_at": now,
+        }},
+        upsert=True,
+        return_document=True,
+        projection={"_id": 0},
+    )
+    return {
+        "id": invitation["id"],
+        "email": invitation["email"],
+        "status": invitation["status"],
+        "created_at": invitation["created_at"],
+    }
+
+@api_router.get("/household/invitations/pending")
+async def pending_household_invitations(user: Dict[str, Any] = Depends(get_current_user)):
+    state = await _household_state(user)
+    return state["pending_invitations"]
+
+@api_router.post("/household/invitations/{invitation_id}/accept")
+async def accept_household_invitation(
+    invitation_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    await _ensure_household_indexes()
+    email = _norm_email(str(user.get("email", "")))
+    now = datetime.now(timezone.utc)
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                invitation = await db.household_invitations.find_one(
+                    {"id": invitation_id, "email": email, "status": "pending"},
+                    {"_id": 0},
+                    session=session,
+                )
+                if not invitation:
+                    raise HTTPException(404, "La invitación no está disponible para esta cuenta")
+                if await db.household_memberships.find_one(
+                    {"user_id": user["user_id"]}, {"_id": 0}, session=session
+                ):
+                    raise HTTPException(409, "Ya perteneces a un espacio familiar")
+                household = await db.households.find_one(
+                    {"id": invitation["household_id"]}, {"_id": 0}, session=session
+                )
+                if not household or household.get("member_count") != 1:
+                    raise HTTPException(409, "El espacio familiar ya no acepta integrantes")
+                claimed = await db.households.update_one(
+                    {"id": household["id"], "member_count": 1},
+                    {"$inc": {"member_count": 1}},
+                    session=session,
+                )
+                if claimed.modified_count != 1:
+                    raise HTTPException(409, "El espacio familiar ya no acepta integrantes")
+                await db.household_memberships.insert_one({
+                    "user_id": user["user_id"],
+                    "household_id": household["id"],
+                    "role": "member",
+                    "invitation_id": invitation_id,
+                    "joined_at": now,
+                }, session=session)
+                changed = await db.household_invitations.update_one(
+                    {"id": invitation_id, "status": "pending"},
+                    {"$set": {"status": "accepted", "accepted_at": now}},
+                    session=session,
+                )
+                if changed.modified_count != 1:
+                    raise HTTPException(409, "La invitación ya fue utilizada")
+    except HTTPException:
+        raise
+    except DuplicateKeyError as exc:
+        raise HTTPException(409, "Ya perteneces a un espacio familiar") from exc
+    except PyMongoError as exc:
+        logger.exception("No se pudo aceptar la invitación familiar")
+        raise HTTPException(503, "No se pudo aceptar la invitación") from exc
+    return await _household_state(user)
+
+async def _remove_household_member(
+    household: Dict[str, Any], member_id: str
+) -> None:
+    membership = await db.household_memberships.find_one(
+        {"user_id": member_id, "household_id": household["id"], "role": "member"},
+        {"_id": 0},
+    )
+    if not membership:
+        raise HTTPException(404, "Integrante no encontrado")
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                removed = await db.household_memberships.delete_one(
+                    {"user_id": member_id, "household_id": household["id"], "role": "member"},
+                    session=session,
+                )
+                if removed.deleted_count != 1:
+                    raise HTTPException(409, "El integrante ya no pertenece al espacio")
+                await db.households.update_one(
+                    {"id": household["id"], "member_count": 2},
+                    {"$inc": {"member_count": -1}},
+                    session=session,
+                )
+                if membership.get("invitation_id"):
+                    await db.household_invitations.update_one(
+                        {"id": membership["invitation_id"], "status": "accepted"},
+                        {"$set": {"status": "revoked", "revoked_at": datetime.now(timezone.utc)}},
+                        session=session,
+                    )
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        logger.exception("No se pudo quitar al integrante del espacio familiar")
+        raise HTTPException(503, "No se pudo actualizar el espacio familiar") from exc
+
+@api_router.delete("/household/members/{member_id}")
+async def remove_household_member(
+    member_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    membership = await db.household_memberships.find_one(
+        {"user_id": user["user_id"]}, {"_id": 0}
+    )
+    if not membership or membership.get("role") != "owner":
+        raise HTTPException(403, "Solo el propietario puede quitar integrantes")
+    if member_id == user["user_id"]:
+        raise HTTPException(400, "El propietario no puede quitarse a sí mismo")
+    household = await db.households.find_one(
+        {"id": membership["household_id"]}, {"_id": 0}
+    )
+    if not household:
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    await _remove_household_member(household, member_id)
+    return await _household_state(user)
+
+@api_router.post("/household/leave")
+async def leave_household(user: Dict[str, Any] = Depends(get_current_user)):
+    membership = await db.household_memberships.find_one(
+        {"user_id": user["user_id"]}, {"_id": 0}
+    )
+    if not membership:
+        raise HTTPException(404, "No perteneces a un espacio familiar")
+    household = await db.households.find_one(
+        {"id": membership["household_id"]}, {"_id": 0}
+    )
+    if not household:
+        raise HTTPException(503, "El espacio familiar no está disponible")
+    if membership["role"] == "member":
+        await _remove_household_member(household, user["user_id"])
+        return {"ok": True}
+    if household.get("member_count") != 1:
+        raise HTTPException(409, "Quita al otro integrante antes de cerrar el espacio")
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                await db.household_memberships.delete_one(
+                    {"user_id": user["user_id"], "household_id": household["id"], "role": "owner"},
+                    session=session,
+                )
+                await db.households.delete_one({"id": household["id"], "member_count": 1}, session=session)
+                await db.household_invitations.update_many(
+                    {"household_id": household["id"], "status": "pending"},
+                    {"$set": {"status": "cancelled", "cancelled_at": datetime.now(timezone.utc)}},
+                    session=session,
+                )
+    except PyMongoError as exc:
+        logger.exception("No se pudo cerrar el espacio familiar")
+        raise HTTPException(503, "No se pudo cerrar el espacio familiar") from exc
+    return {"ok": True}
+
+@api_router.delete("/household/invitations/{invitation_id}")
+async def cancel_household_invitation(
+    invitation_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    membership = await db.household_memberships.find_one(
+        {"user_id": user["user_id"], "role": "owner"}, {"_id": 0}
+    )
+    if not membership:
+        raise HTTPException(403, "Solo el propietario puede cancelar invitaciones")
+    result = await db.household_invitations.update_one(
+        {
+            "id": invitation_id,
+            "household_id": membership["household_id"],
+            "status": "pending",
+        },
+        {"$set": {"status": "cancelled", "cancelled_at": datetime.now(timezone.utc)}},
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Invitación no encontrada")
+    return await _household_state(user)
+
 # ============ MARKETS ============
 @api_router.get("/markets", response_model=List[Market])
 async def list_markets(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = await db.markets.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    user_ids = await _accessible_user_ids(user)
+    rows = await db.markets.find(_user_scope(user_ids), {"_id": 0}).sort("created_at", 1).to_list(500)
     return [Market(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/markets", response_model=Market)
@@ -604,8 +1074,9 @@ async def create_market(payload: MarketCreate, user: Dict[str, Any] = Depends(ge
 @api_router.put("/markets/{market_id}", response_model=Market)
 async def update_market(market_id: str, payload: MarketUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     upd = {k: v for k, v in payload.dict().items() if v is not None}
+    user_ids = await _accessible_user_ids(user)
     r = await db.markets.find_one_and_update(
-        {"id": market_id, "user_id": user["user_id"]},
+        _user_scope(user_ids, id=market_id),
         {"$set": upd},
         return_document=True,
         projection={"_id": 0},
@@ -616,7 +1087,8 @@ async def update_market(market_id: str, payload: MarketUpdate, user: Dict[str, A
 
 @api_router.delete("/markets/{market_id}")
 async def delete_market(market_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    r = await db.markets.delete_one({"id": market_id, "user_id": user["user_id"]})
+    user_ids = await _accessible_user_ids(user)
+    r = await db.markets.delete_one(_user_scope(user_ids, id=market_id))
     if r.deleted_count == 0:
         raise HTTPException(404, "Market not found")
     return {"ok": True}
@@ -624,7 +1096,8 @@ async def delete_market(market_id: str, user: Dict[str, Any] = Depends(get_curre
 # ============ PURCHASES ============
 @api_router.get("/purchases", response_model=List[Purchase])
 async def list_purchases(month: Optional[str] = None, market_id: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
-    q: Dict[str, Any] = {"user_id": user["user_id"]}
+    user_ids = await _accessible_user_ids(user)
+    q: Dict[str, Any] = _user_scope(user_ids)
     if market_id:
         q["market_id"] = market_id
     if month:
@@ -643,7 +1116,8 @@ async def list_purchases(month: Optional[str] = None, market_id: Optional[str] =
 
 @api_router.post("/purchases", response_model=Purchase)
 async def create_purchase(payload: PurchaseCreate, user: Dict[str, Any] = Depends(get_current_user)):
-    market = await db.markets.find_one({"id": payload.market_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    market = await db.markets.find_one(_user_scope(user_ids, id=payload.market_id), {"_id": 0})
     if not market:
         raise HTTPException(404, "Market not found")
     items = [PurchaseItem(**i.dict()) for i in payload.items]
@@ -665,17 +1139,20 @@ async def create_purchase(payload: PurchaseCreate, user: Dict[str, Any] = Depend
 
 @api_router.get("/purchases/{purchase_id}", response_model=Purchase)
 async def get_purchase(purchase_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    r = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    r = await db.purchases.find_one(_user_scope(user_ids, id=purchase_id), {"_id": 0})
     if not r:
         raise HTTPException(404, "Purchase not found")
     return Purchase(**cast(Dict[str, Any], r))
 
 @api_router.put("/purchases/{purchase_id}", response_model=Purchase)
 async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: Dict[str, Any] = Depends(get_current_user)):
-    existing = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    purchase_query = _user_scope(user_ids, id=purchase_id)
+    existing = await db.purchases.find_one(purchase_query, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Purchase not found")
-    market = await db.markets.find_one({"id": payload.market_id, "user_id": user["user_id"]}, {"_id": 0})
+    market = await db.markets.find_one(_user_scope(user_ids, id=payload.market_id), {"_id": 0})
     if not market:
         raise HTTPException(404, "Market not found")
     items = [PurchaseItem(**i.dict()) for i in payload.items]
@@ -694,13 +1171,14 @@ async def update_purchase(purchase_id: str, payload: PurchaseCreate, user: Dict[
         "note": payload.note,
         "date": payload.date or existing.get("date"),
     }
-    await db.purchases.update_one({"id": purchase_id, "user_id": user["user_id"]}, {"$set": updated})
-    doc = await db.purchases.find_one({"id": purchase_id, "user_id": user["user_id"]}, {"_id": 0})
+    await db.purchases.update_one(purchase_query, {"$set": updated})
+    doc = await db.purchases.find_one(purchase_query, {"_id": 0})
     return Purchase(**cast(Dict[str, Any], doc))
 
 @api_router.delete("/purchases/{purchase_id}")
 async def delete_purchase(purchase_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    r = await db.purchases.delete_one({"id": purchase_id, "user_id": user["user_id"]})
+    user_ids = await _accessible_user_ids(user)
+    r = await db.purchases.delete_one(_user_scope(user_ids, id=purchase_id))
     if r.deleted_count == 0:
         raise HTTPException(404, "Purchase not found")
     return {"ok": True}
@@ -708,6 +1186,7 @@ async def delete_purchase(purchase_id: str, user: Dict[str, Any] = Depends(get_c
 # ============ REPORTS ============
 @api_router.get("/reports/monthly")
 async def monthly_report(month: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
+    user_ids = await _accessible_user_ids(user)
     now = datetime.now(timezone.utc)
     if not month:
         month = f"{now.year:04d}-{now.month:02d}"
@@ -715,10 +1194,9 @@ async def monthly_report(month: Optional[str] = None, user: Dict[str, Any] = Dep
     start = datetime(int(y), int(m), 1, tzinfo=timezone.utc)
     end = datetime(int(y) + 1, 1, 1, tzinfo=timezone.utc) if int(m) == 12 else datetime(int(y), int(m) + 1, 1, tzinfo=timezone.utc)
 
-    rows = await db.purchases.find({
-        "user_id": user["user_id"],
+    rows = await db.purchases.find(_user_scope(user_ids, **{
         "date": {"$gte": start, "$lt": end},
-    }, {"_id": 0}).to_list(2000)
+    }), {"_id": 0}).to_list(2000)
 
     total_by_currency: Dict[str, float] = {}
     by_market: Dict[str, Dict[str, float]] = {}
@@ -905,13 +1383,13 @@ async def scan_receipt(payload: OCRRequest, user: Dict[str, Any] = Depends(get_c
     return {"currency": currency, "items": items}
 
 # ============ SHOPPING LISTS ROUTES ============
-async def _backfill_shopping_list_history(row: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+async def _backfill_shopping_list_history(row: Dict[str, Any], user_ids: List[str]) -> Dict[str, Any]:
     items = row.get("items", [])
     missing = [item for item in items if item.get("estimated_price") is None]
     if not missing:
         return row
 
-    purchases = await db.purchases.find({"user_id": user_id}, {"_id": 0}).sort("date", -1).to_list(3000)
+    purchases = await db.purchases.find(_user_scope(user_ids), {"_id": 0}).sort("date", -1).to_list(3000)
     changed = False
     for item in items:
         if item.get("estimated_price") is not None:
@@ -933,15 +1411,16 @@ async def _backfill_shopping_list_history(row: Dict[str, Any], user_id: str) -> 
 
     if changed:
         await db.shopping_lists.update_one(
-            {"id": row["id"], "user_id": user_id},
+            _user_scope(user_ids, id=row["id"]),
             {"$set": {"items": items}},
         )
     return row
 
 @api_router.get("/shopping-lists", response_model=List[ShoppingList])
 async def list_shopping_lists(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = await db.shopping_lists.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    rows = [await _backfill_shopping_list_history(row, user["user_id"]) for row in rows]
+    user_ids = await _accessible_user_ids(user)
+    rows = await db.shopping_lists.find(_user_scope(user_ids), {"_id": 0}).sort("created_at", -1).to_list(500)
+    rows = [await _backfill_shopping_list_history(row, user_ids) for row in rows]
     return [ShoppingList(**cast(Dict[str, Any], r)) for r in rows]
 
 @api_router.post("/shopping-lists", response_model=ShoppingList)
@@ -952,17 +1431,19 @@ async def create_shopping_list(payload: ShoppingListCreate, user: Dict[str, Any]
 
 @api_router.get("/shopping-lists/{list_id}", response_model=ShoppingList)
 async def get_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    r = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    r = await db.shopping_lists.find_one(_user_scope(user_ids, id=list_id), {"_id": 0})
     if not r:
         raise HTTPException(404, "List not found")
-    r = await _backfill_shopping_list_history(r, user["user_id"])
+    r = await _backfill_shopping_list_history(r, user_ids)
     return ShoppingList(**cast(Dict[str, Any], r))
 
 @api_router.put("/shopping-lists/{list_id}", response_model=ShoppingList)
 async def update_shopping_list(list_id: str, payload: ShoppingListUpdate, user: Dict[str, Any] = Depends(get_current_user)):
     upd = {k: v for k, v in payload.dict().items() if v is not None}
+    user_ids = await _accessible_user_ids(user)
     r = await db.shopping_lists.find_one_and_update(
-        {"id": list_id, "user_id": user["user_id"]},
+        _user_scope(user_ids, id=list_id),
         {"$set": upd},
         return_document=True,
         projection={"_id": 0},
@@ -973,21 +1454,24 @@ async def update_shopping_list(list_id: str, payload: ShoppingListUpdate, user: 
 
 @api_router.delete("/shopping-lists/{list_id}")
 async def delete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    r = await db.shopping_lists.delete_one({"id": list_id, "user_id": user["user_id"]})
+    user_ids = await _accessible_user_ids(user)
+    r = await db.shopping_lists.delete_one(_user_scope(user_ids, id=list_id))
     if r.deleted_count == 0:
         raise HTTPException(404, "List not found")
     return {"ok": True}
 
 @api_router.post("/shopping-lists/{list_id}/items", response_model=ShoppingList)
 async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, user: Dict[str, Any] = Depends(get_current_user)):
-    sl = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    list_query = _user_scope(user_ids, id=list_id)
+    sl = await db.shopping_lists.find_one(list_query, {"_id": 0})
     if not sl:
         raise HTTPException(404, "List not found")
 
     data = payload.dict()
     if data.get("status") == "pending" and data.get("estimated_price") is None:
         current_name = " ".join(str(data.get("name", "")).split()).casefold()
-        purchases = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
+        purchases = await db.purchases.find(_user_scope(user_ids), {"_id": 0}).sort("date", -1).to_list(3000)
         for latest_purchase in purchases:
             history_item = next(
                 (entry for entry in latest_purchase.get("items", [])
@@ -1015,15 +1499,17 @@ async def add_shopping_list_item(list_id: str, payload: ShoppingListItemCreate, 
 
     item = ShoppingListItem(**data)
     await db.shopping_lists.update_one(
-        {"id": list_id, "user_id": user["user_id"]},
+        list_query,
         {"$push": {"items": item.dict()}},
     )
-    updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    updated = await db.shopping_lists.find_one(list_query, {"_id": 0})
     return ShoppingList(**cast(Dict[str, Any], updated))
 
 @api_router.put("/shopping-lists/{list_id}/items/{item_id}", response_model=ShoppingList)
 async def update_shopping_list_item(list_id: str, item_id: str, payload: ShoppingListItemUpdate, user: Dict[str, Any] = Depends(get_current_user)):
-    sl = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    user_ids = await _accessible_user_ids(user)
+    list_query = _user_scope(user_ids, id=list_id)
+    sl = await db.shopping_lists.find_one(list_query, {"_id": 0})
     if not sl:
         raise HTTPException(404, "List not found")
     items = sl.get("items", [])
@@ -1038,7 +1524,7 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
         upd_dict["imported_purchase_id"] = None
     if upd_dict.get("status") == "bought" and items[idx].get("estimated_price") is None:
         current_name = " ".join(str(items[idx].get("name", "")).split()).casefold()
-        purchases = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
+        purchases = await db.purchases.find(_user_scope(user_ids), {"_id": 0}).sort("date", -1).to_list(3000)
         for latest_purchase in purchases:
             history_item = next(
                 (entry for entry in latest_purchase.get("items", [])
@@ -1053,7 +1539,9 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
                 break
 
     if "paid_market_id" in upd_dict and upd_dict["paid_market_id"]:
-        market = await db.markets.find_one({"id": upd_dict["paid_market_id"], "user_id": user["user_id"]}, {"_id": 0})
+        market = await db.markets.find_one(
+            _user_scope(user_ids, id=upd_dict["paid_market_id"]), {"_id": 0}
+        )
         if market:
             upd_dict["paid_market_name"] = market["name"]
 
@@ -1071,18 +1559,19 @@ async def update_shopping_list_item(list_id: str, item_id: str, payload: Shoppin
         items[idx][k] = v
 
     await db.shopping_lists.update_one(
-        {"id": list_id, "user_id": user["user_id"]},
+        list_query,
         {"$set": {"items": items}},
     )
-    updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    updated = await db.shopping_lists.find_one(list_query, {"_id": 0})
     return ShoppingList(**cast(Dict[str, Any], updated))
 
 @api_router.post("/shopping-lists/{list_id}/complete")
 async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     """Import confirmed, priced list items into purchase history exactly once per buy cycle."""
-    user_id = user["user_id"]
+    user_ids = await _accessible_user_ids(user)
+    list_query = _user_scope(user_ids, id=list_id)
     shopping_list = await db.shopping_lists.find_one(
-        {"id": list_id, "user_id": user_id}, {"_id": 0}
+        list_query, {"_id": 0}
     )
     if not shopping_list:
         raise HTTPException(404, "List not found")
@@ -1094,7 +1583,7 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
     ]
     if not to_import:
         latest = await db.shopping_lists.find_one(
-            {"id": list_id, "user_id": user_id}, {"_id": 0}
+            list_query, {"_id": 0}
         )
         return {"list": latest, "purchases": [], "imported_count": 0}
 
@@ -1107,7 +1596,7 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
             raise HTTPException(422, f"Selecciona un mercado para {item.get('name', 'un producto')}")
         if market_id not in markets:
             market = await db.markets.find_one(
-                {"id": market_id, "user_id": user_id}, {"_id": 0}
+                _user_scope(user_ids, id=market_id), {"_id": 0}
             )
             if not market:
                 raise HTTPException(422, f"El mercado de {item.get('name', 'un producto')} ya no está disponible")
@@ -1127,12 +1616,15 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
         grouped.setdefault(group_key, []).append({**item, "_paid_at": paid_at})
 
     created: List[Purchase] = []
+    # Attribute completion-generated history to the list's creator. That stable
+    # owner also makes concurrent completions by either spouse idempotent.
+    list_owner_id = str(shopping_list["user_id"])
     for (market_id, _purchase_day), group in grouped.items():
         market = markets[market_id]
         cycles = sorted(
             item.get("purchase_cycle_id") or item["id"] for item in group
         )
-        source_key = f"{user_id}:{list_id}:{market_id}:{','.join(cycles)}"
+        source_key = f"{list_owner_id}:{list_id}:{market_id}:{','.join(cycles)}"
         purchase_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source_key))
         purchase_items = [
             PurchaseItem(
@@ -1146,7 +1638,7 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
         ]
         purchase = Purchase(
             id=purchase_id,
-            user_id=user_id,
+            user_id=list_owner_id,
             market_id=market_id,
             market_name=market["name"],
             currency=shopping_list.get("currency", "PYG"),
@@ -1163,18 +1655,18 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
         document = purchase.dict()
         document["_id"] = purchase_id
         await db.purchases.update_one(
-            {"_id": purchase_id, "user_id": user_id},
+            {"_id": purchase_id, **_user_scope(user_ids)},
             {"$setOnInsert": document},
             upsert=True,
         )
         saved = await db.purchases.find_one(
-            {"_id": purchase_id, "user_id": user_id}, {"_id": 0}
+            {"_id": purchase_id, **_user_scope(user_ids)}, {"_id": 0}
         )
         created.append(Purchase(**cast(Dict[str, Any], saved)))
 
         for item in group:
             await db.shopping_lists.update_one(
-                {"id": list_id, "user_id": user_id},
+                list_query,
                 {"$set": {"items.$[entry].imported_purchase_id": purchase_id}},
                 array_filters=[{
                     "entry.id": item["id"],
@@ -1184,25 +1676,28 @@ async def complete_shopping_list(list_id: str, user: Dict[str, Any] = Depends(ge
             )
 
     updated = await db.shopping_lists.find_one(
-        {"id": list_id, "user_id": user_id}, {"_id": 0}
+        list_query, {"_id": 0}
     )
     return {"list": updated, "purchases": created, "imported_count": len(to_import)}
 
 @api_router.delete("/shopping-lists/{list_id}/items/{item_id}", response_model=ShoppingList)
 async def delete_shopping_list_item(list_id: str, item_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    user_ids = await _accessible_user_ids(user)
+    list_query = _user_scope(user_ids, id=list_id)
     r = await db.shopping_lists.update_one(
-        {"id": list_id, "user_id": user["user_id"]},
+        list_query,
         {"$pull": {"items": {"id": item_id}}},
     )
     if r.matched_count == 0:
         raise HTTPException(404, "List not found")
-    updated = await db.shopping_lists.find_one({"id": list_id, "user_id": user["user_id"]}, {"_id": 0})
+    updated = await db.shopping_lists.find_one(list_query, {"_id": 0})
     return ShoppingList(**cast(Dict[str, Any], updated))
 
 # ============ PRODUCT HISTORY ============
 @api_router.get("/products/history")
 async def products_history(q: Optional[str] = None, user: Dict[str, Any] = Depends(get_current_user)):
-    rows = await db.purchases.find({"user_id": user["user_id"]}, {"_id": 0}).sort("date", -1).to_list(3000)
+    user_ids = await _accessible_user_ids(user)
+    rows = await db.purchases.find(_user_scope(user_ids), {"_id": 0}).sort("date", -1).to_list(3000)
 
     products: Dict[str, Any] = {}
     for r in rows:

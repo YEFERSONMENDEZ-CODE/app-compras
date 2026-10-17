@@ -17,3 +17,21 @@ The free tier has per-project request limits. Scans can fail temporarily when
 those limits are reached. Google states that content submitted on the free tier
 may be used to improve its products; the scanner screen discloses this before
 the user takes or selects a receipt image.
+
+## Authentication
+
+Email/password registration and login are enabled by default. Google OAuth uses
+the backend callback configured in `GOOGLE_OAUTH_REDIRECT_URI`. The allowed
+frontend return URLs are configured with `GOOGLE_OAUTH_ALLOWED_REDIRECTS`;
+development also allows `http://localhost:8081/` and
+`http://127.0.0.1:8081/`.
+
+Password recovery uses a single-use token that expires after 30 minutes. To
+send recovery messages, configure:
+
+- `RESEND_API_KEY`
+- `EMAIL_FROM` (for example, `Despensa <no-reply@your-domain.com>`)
+- `FRONTEND_PUBLIC_URL` (the public frontend URL)
+
+Without `RESEND_API_KEY`, the API still returns a generic response but no email
+can be delivered.
