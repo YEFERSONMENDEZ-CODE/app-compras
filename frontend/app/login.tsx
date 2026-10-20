@@ -7,12 +7,13 @@ import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import { theme } from "@/src/theme";
 import * as WebBrowser from "expo-web-browser";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 type Mode = "welcome" | "email-login" | "email-register" | "forgot";
 WebBrowser.maybeCompleteAuthSession();
 
 export default function LoginScreen() {
-  const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError } = useAuth();
+  const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError, mode: authMode } = useAuth();
+  const router = useRouter();
   const params = useLocalSearchParams<{ reset_token?: string }>();
   const [mode, setMode] = useState<Mode>("welcome");
   const [loading, setLoading] = useState<string | null>(null);
@@ -26,7 +27,10 @@ export default function LoginScreen() {
   const [err, setErr] = useState<string | null>(null);
   const resetToken = typeof params.reset_token === "string" ? params.reset_token : "";
 
-  
+  useEffect(() => {
+    if (authMode === "authenticated") router.replace("/(tabs)");
+  }, [authMode, router]);
+
   useEffect(() => {
     api<any>("/auth/providers", { auth: false }).then(setProviders).catch(() => {});
     if (Platform.OS === "ios") {
@@ -249,6 +253,14 @@ export default function LoginScreen() {
               <Text style={styles.fbText}>Facebook</Text>
             </Pressable>
           ) : null}
+
+          <Pressable
+            testID="continue-guest-btn"
+            onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)"))}
+            style={{ alignItems: "center", paddingVertical: 14 }}
+          >
+            <Text style={styles.legal}>Continuar sin iniciar sesión</Text>
+          </Pressable>
 
           <Text style={styles.legal}>Guaraní, USD, EUR, BRL y ARS soportados</Text>
         </View>
