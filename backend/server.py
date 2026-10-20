@@ -11,6 +11,7 @@ import uuid
 import base64
 import json
 import hashlib
+import ipaddress
 import secrets
 import httpx
 from pathlib import Path
@@ -441,12 +442,24 @@ def _append_auth_query(url: str, **params: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
+def _is_expo_dev_redirect(uri: str) -> bool:
+    # Expo Go devuelve exp://<IP-LAN>:<puerto>/--/auth; solo se acepta en redes privadas.
+    parts = urlsplit(uri)
+    if parts.scheme != "exp" or parts.path != "/--/auth" or parts.query or parts.fragment:
+        return False
+    try:
+        host = ipaddress.ip_address(parts.hostname or "")
+    except ValueError:
+        return parts.hostname == "localhost"
+    return host.is_private or host.is_loopback
+
+
 @api_router.get("/auth/google/start")
 async def google_auth_start(redirect_uri: str):
     client_id, client_secret, callback_url = _google_oauth_config()
     if not client_id or not client_secret:
         raise HTTPException(status_code=503, detail="El inicio de sesión con Google aún no está configurado")
-    if redirect_uri not in _google_oauth_redirect_targets():
+    if redirect_uri not in _google_oauth_redirect_targets() and not _is_expo_dev_redirect(redirect_uri):
         raise HTTPException(status_code=400, detail="URI de retorno no permitida")
 
     state = secrets.token_urlsafe(32)
