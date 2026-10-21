@@ -35,7 +35,15 @@ send recovery messages, configure:
 
 Recovery works for any existing account email (including users that originally
 signed in only with Google). After confirming the reset token, the account gets
-an email/password credential.
+an email/password credential. Registering with an email that already exists is
+rejected, so nobody can attach a password to someone else's account.
+
+Emails are sent through SMTP when `SMTP_HOST` is set (works for any recipient),
+otherwise through Resend. SMTP settings: `SMTP_HOST`, `SMTP_PORT` (587 or 465),
+`SMTP_USER`, `SMTP_PASSWORD` and optionally `EMAIL_FROM`. For Gmail use
+`smtp.gmail.com`, port 587 and an App Password. Resend's `onboarding@resend.dev`
+sender only delivers to the Resend account owner; verify a domain to send to
+everyone.
 
 Without `RESEND_API_KEY`, the API still returns a generic response but no email
 can be delivered.

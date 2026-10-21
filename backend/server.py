@@ -13,6 +13,9 @@ import json
 import hashlib
 import ipaddress
 import secrets
+import smtplib
+import ssl
+from email.message import EmailMessage
 import httpx
 from pathlib import Path
 from io import BytesIO
@@ -279,6 +282,10 @@ async def _ensure_household_indexes() -> None:
         [("household_id", ASCENDING), ("email", ASCENDING)], unique=True
     )
     await db.households.create_index("owner_user_id", unique=True)
+    try:
+        await db.users.create_index("email", unique=True)
+    except Exception:
+        logger.warning("No se pudo crear el índice único de users.email (¿correos duplicados existentes?)")
     _household_indexes_ready = True
 
 async def _accessible_user_ids(user: Dict[str, Any]) -> List[str]:
@@ -343,37 +350,71 @@ def _verify_password(pw: str, hashed: str) -> bool:
 def _norm_email(email: str) -> str:
     return email.strip().lower()
 
-async def _send_password_reset_email(email: str, token: str) -> bool:
+def _send_smtp_email(to: str, subject: str, html: str, sender: str) -> None:
+    host = os.environ.get("SMTP_HOST", "").strip()
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "")
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content("Abre este mensaje en un cliente de correo compatible con HTML.")
+    msg.add_alternative(html, subtype="html")
+    context = ssl.create_default_context()
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as server:
+            server.login(user, password)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port, timeout=20) as server:
+            server.starttls(context=context)
+            server.login(user, password)
+            server.send_message(msg)
+
+
+async def _send_email(to: str, subject: str, html: str) -> bool:
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_user = os.environ.get("SMTP_USER", "").strip()
+    if smtp_host:
+        sender = os.environ.get("EMAIL_FROM", "").strip() or f"Despensa <{smtp_user}>"
+        try:
+            await run_in_threadpool(_send_smtp_email, to, subject, html, sender)
+            return True
+        except Exception as exc:
+            logger.error("SMTP email failed: %s", type(exc).__name__)
+            return False
+
     resend_key = os.environ.get("RESEND_API_KEY", "").strip()
-    frontend_url = os.environ.get("FRONTEND_PUBLIC_URL", GOOGLE_OAUTH_WEB_REDIRECT).rstrip("/")
     sender = os.environ.get("EMAIL_FROM", "Despensa <onboarding@resend.dev>").strip()
     if not resend_key:
-        logger.warning("Password reset requested but RESEND_API_KEY is not configured")
+        logger.warning("Email requested but neither SMTP_HOST nor RESEND_API_KEY is configured")
         return False
-    reset_url = f"{frontend_url}/login?{urlencode({'reset_token': token})}"
     async with httpx.AsyncClient(timeout=15) as http:
         response = await http.post(
             "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
-            json={
-                "from": sender,
-                "to": [email],
-                "subject": "Restablecer contraseña de Despensa",
-                "html": (
-                    "<p>Recibimos una solicitud para restablecer tu contraseña.</p>"
-                    f'<p><a href="{reset_url}">Crear una nueva contraseña</a></p>'
-                    "<p>Este enlace vence en 30 minutos. Si no lo solicitaste, ignora este mensaje.</p>"
-                ),
-            },
+            headers={"Authorization": "Bearer " + resend_key, "Content-Type": "application/json"},
+            json={"from": sender, "to": [to], "subject": subject, "html": html},
         )
     if response.status_code >= 300:
         logger.error(
-            "Password reset email provider rejected request: status=%s body=%s",
+            "Email provider rejected request: status=%s body=%s",
             response.status_code,
             response.text[:300],
         )
         return False
     return True
+
+
+async def _send_password_reset_email(email: str, token: str) -> bool:
+    frontend_url = os.environ.get("FRONTEND_PUBLIC_URL", GOOGLE_OAUTH_WEB_REDIRECT).rstrip("/")
+    reset_url = f"{frontend_url}/login?{urlencode({'reset_token': token})}"
+    html = (
+        "<p>Recibimos una solicitud para restablecer tu contraseña.</p>"
+        f'<p><a href="{reset_url}">Crear una nueva contraseña</a></p>'
+        "<p>Este enlace vence en 30 minutos. Si no lo solicitaste, ignora este mensaje.</p>"
+    )
+    return await _send_email(email, "Restablecer contraseña de Despensa", html)
 
 async def _issue_session(user_id: str) -> str:
     token = f"sess_{uuid.uuid4().hex}{uuid.uuid4().hex}"
@@ -590,25 +631,24 @@ async def auth_register(payload: RegisterRequest):
         raise HTTPException(400, "Contraseña demasiado larga")
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
+        # Nunca se asigna una contraseña a una cuenta existente solo con conocer el correo:
+        # el dueño debe usar su método actual o recuperar la contraseña desde su correo.
         if existing.get("password_hash"):
-            raise HTTPException(409, "Ya existe una cuenta con ese correo")
-        await db.users.update_one(
-            {"user_id": existing["user_id"]},
-            {"$set": {"password_hash": _hash_password(payload.password),
-                      "name": existing.get("name") or payload.name or email.split("@", 1)[0]}},
+            raise HTTPException(409, "Ya existe una cuenta con ese correo. Inicia sesión o recupera tu contraseña.")
+        raise HTTPException(
+            409,
+            "Ya existe una cuenta con ese correo (iniciada con Google). Entra con Google o usa «¿Olvidaste tu contraseña?» para crear una contraseña.",
         )
-        user = await db.users.find_one({"user_id": existing["user_id"]}, {"_id": 0})
-    else:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        doc = {
-            "user_id": user_id, "email": email,
-            "name": payload.name or email.split("@", 1)[0],
-            "picture": None, "preferred_currency": "PYG",
-            "password_hash": _hash_password(payload.password),
-            "created_at": datetime.now(timezone.utc),
-        }
-        await db.users.insert_one(doc)
-        user = doc
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    doc = {
+        "user_id": user_id, "email": email,
+        "name": payload.name or email.split("@", 1)[0],
+        "picture": None, "preferred_currency": "PYG",
+        "password_hash": _hash_password(payload.password),
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.users.insert_one(doc)
+    user = doc
     token = await _issue_session(user["user_id"])
     return SessionResponse(session_token=token, user=_user_public(user))
 

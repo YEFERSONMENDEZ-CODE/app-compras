@@ -15,7 +15,7 @@ export default function LoginScreen() {
   const { signIn, signInWithEmail, registerWithEmail, signInWithApple, signInWithFacebook, googleAuthError, mode: authMode } = useAuth();
   const router = useRouter();
   const params = useLocalSearchParams<{ reset_token?: string }>();
-  const [mode, setMode] = useState<Mode>("welcome");
+  const [modeState, setMode] = useState<Mode>("welcome");
   const [loading, setLoading] = useState<string | null>(null);
   const [providers, setProviders] = useState<any>({ google: false, apple: true, email: true, facebook: false });
   const [appleAvailable, setAppleAvailable] = useState(false);
@@ -26,10 +26,11 @@ export default function LoginScreen() {
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const resetToken = typeof params.reset_token === "string" ? params.reset_token : "";
+  const mode: Mode = resetToken ? "forgot" : modeState;
 
   useEffect(() => {
-    if (authMode === "authenticated") router.replace("/(tabs)");
-  }, [authMode, router]);
+    if (authMode === "authenticated" && !resetToken) router.replace("/(tabs)");
+  }, [authMode, router, resetToken]);
 
   useEffect(() => {
     api<any>("/auth/providers", { auth: false }).then(setProviders).catch(() => {});
@@ -76,6 +77,7 @@ export default function LoginScreen() {
         await api("/auth/password-reset/confirm", { method: "POST", body: { token: resetToken, password } , auth: false });
         setMode("email-login");
         setPassword("");
+        router.replace("/login");
         showError("Contraseña actualizada. Ya puedes iniciar sesión.");
       } else if (mode === "forgot") {
         await api("/auth/password-reset/request", { method: "POST", body: { email: email.trim() }, auth: false });
@@ -94,7 +96,7 @@ export default function LoginScreen() {
       <SafeAreaView style={styles.emailBg} edges={["top", "bottom"]} testID="email-auth-screen">
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
           <ScrollView contentContainerStyle={styles.emailScroll} keyboardShouldPersistTaps="handled">
-            <Pressable onPress={() => setMode("welcome")} style={styles.backBtn} testID="email-back-btn">
+            <Pressable onPress={() => (resetToken ? router.replace("/login") : setMode("welcome"))} style={styles.backBtn} testID="email-back-btn">
               <ArrowLeft color={theme.colors.onSurface} size={22} />
             </Pressable>
 
