@@ -678,7 +678,10 @@ async def request_password_reset(payload: PasswordResetRequest):
             "expires_at": now + timedelta(minutes=30),
             "created_at": now,
         })
-        await _send_password_reset_email(email, token)
+        sent = await _send_password_reset_email(email, token)
+        logger.info("Password reset email: account_found=True sent=%s", sent)
+    else:
+        logger.info("Password reset email: account_found=False (no existe una cuenta con ese correo)")
     return {"message": "Si existe una cuenta con ese correo, recibirás instrucciones para restablecer la contraseña."}
 
 @api_router.post("/auth/password-reset/confirm")
