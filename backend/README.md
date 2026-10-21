@@ -33,5 +33,9 @@ send recovery messages, configure:
 - `EMAIL_FROM` (for example, `Despensa <no-reply@your-domain.com>`)
 - `FRONTEND_PUBLIC_URL` (the public frontend URL)
 
+Recovery works for any existing account email (including users that originally
+signed in only with Google). After confirming the reset token, the account gets
+an email/password credential.
+
 Without `RESEND_API_KEY`, the API still returns a generic response but no email
 can be delivered.

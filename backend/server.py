@@ -623,7 +623,7 @@ async def auth_login(payload: LoginRequest):
 @api_router.post("/auth/password-reset/request")
 async def request_password_reset(payload: PasswordResetRequest):
     email = _norm_email(payload.email)
-    user = await db.users.find_one({"email": email, "password_hash": {"$exists": True}}, {"_id": 0})
+    user = await db.users.find_one({"email": email}, {"_id": 0})
     if user:
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
