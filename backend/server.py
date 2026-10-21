@@ -367,7 +367,11 @@ async def _send_password_reset_email(email: str, token: str) -> bool:
             },
         )
     if response.status_code >= 300:
-        logger.error("Password reset email provider rejected request: status=%s", response.status_code)
+        logger.error(
+            "Password reset email provider rejected request: status=%s body=%s",
+            response.status_code,
+            response.text[:300],
+        )
         return False
     return True
 
