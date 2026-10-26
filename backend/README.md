@@ -38,11 +38,13 @@ signed in only with Google). After confirming the reset token, the account gets
 an email/password credential. Registering with an email that already exists is
 rejected, so nobody can attach a password to someone else's account.
 
-Emails are sent through SMTP when `SMTP_HOST` is set (works for any recipient),
-otherwise through Resend. SMTP settings: `SMTP_HOST`, `SMTP_PORT` (587 or 465),
-`SMTP_USER`, `SMTP_PASSWORD` and optionally `EMAIL_FROM`. For Gmail use
-`smtp.gmail.com`, port 587 and an App Password. Resend's `onboarding@resend.dev`
-sender only delivers to the Resend account owner; verify a domain to send to
+Emails are sent through Brevo's HTTPS API when `BREVO_API_KEY` is set (works for
+any recipient with only a verified sender address, no domain needed). Also set
+`EMAIL_FROM_ADDRESS` (the verified sender) and optionally `EMAIL_FROM_NAME`.
+Render's free plan blocks outbound SMTP ports (25/465/587), so SMTP only works on
+hosts that allow it: set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`
+and optionally `EMAIL_FROM`. Otherwise Resend is used; its `onboarding@resend.dev`
+sender only delivers to the Resend account owner, so verify a domain to send to
 everyone.
 
 Without `RESEND_API_KEY`, the API still returns a generic response but no email

@@ -374,6 +374,29 @@ def _send_smtp_email(to: str, subject: str, html: str, sender: str) -> None:
 
 
 async def _send_email(to: str, subject: str, html: str) -> bool:
+    brevo_key = os.environ.get("BREVO_API_KEY", "").strip()
+    if brevo_key:
+        sender_email = os.environ.get("EMAIL_FROM_ADDRESS", "").strip()
+        if not sender_email:
+            logger.error("BREVO_API_KEY configurada pero falta EMAIL_FROM_ADDRESS (correo remitente verificado en Brevo)")
+            return False
+        sender_name = os.environ.get("EMAIL_FROM_NAME", "Despensa").strip() or "Despensa"
+        async with httpx.AsyncClient(timeout=15) as http:
+            response = await http.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={"api-key": brevo_key, "accept": "application/json", "content-type": "application/json"},
+                json={
+                    "sender": {"name": sender_name, "email": sender_email},
+                    "to": [{"email": to}],
+                    "subject": subject,
+                    "htmlContent": html,
+                },
+            )
+        if response.status_code >= 300:
+            logger.error("Brevo rejected email: status=%s body=%s", response.status_code, response.text[:300])
+            return False
+        return True
+
     smtp_host = os.environ.get("SMTP_HOST", "").strip()
     smtp_user = os.environ.get("SMTP_USER", "").strip()
     if smtp_host:
