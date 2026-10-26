@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Alert, Platform } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Alert, Platform, Modal, TextInput } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Plus, Camera, Receipt, ShoppingBasket, TrendingUp, Share2 } from "lucide-react-native";
@@ -36,8 +36,12 @@ function purchaseShareMessage(purchase: Purchase): string {
 }
 
 export default function Dashboard() {
-  const { user } = useAuth();
+  const { user, mode, needsGuestName, setGuestName } = useAuth();
   const router = useRouter();
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const showNameDialog = needsGuestName || editingName;
+  const isGuest = mode === "guest";
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [purchases, setPurchases] = useState<Purchase[]>([]);
@@ -84,15 +88,52 @@ export default function Dashboard() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]} testID="dashboard-screen">
+      <Modal visible={showNameDialog} transparent animationType="fade" onRequestClose={() => { setEditingName(false); void setGuestName(null); }}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>¿Cómo te llamas?</Text>
+            <Text style={styles.modalText}>Lo usaremos para saludarte en la pantalla principal.</Text>
+            <TextInput
+              testID="guest-name-input"
+              value={nameDraft}
+              onChangeText={setNameDraft}
+              placeholder="Tu nombre"
+              placeholderTextColor={theme.colors.muted}
+              style={styles.modalInput}
+              autoCapitalize="words"
+              maxLength={40}
+              autoFocus
+            />
+            <Pressable
+              testID="guest-name-save"
+              style={styles.modalPrimary}
+              onPress={async () => { await setGuestName(nameDraft); setEditingName(false); }}
+            >
+              <Text style={styles.modalPrimaryText}>Guardar</Text>
+            </Pressable>
+            <Pressable
+              testID="guest-name-skip"
+              style={styles.modalSkip}
+              onPress={async () => { await setGuestName(null); setEditingName(false); }}
+            >
+              <Text style={styles.modalSkipText}>Ahora no</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
       <ScrollView
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={theme.colors.brand} />}
       >
         <View style={styles.header}>
-          <View>
-            <Text style={styles.hi}>Hola, {user?.name?.split(" ")[0] || "amigo"}</Text>
+          <Pressable
+            disabled={!isGuest}
+            onPress={() => { setNameDraft(user?.name || ""); setEditingName(true); }}
+            testID="greeting-btn"
+          >
+            <Text style={styles.hi}>Hola, {user?.name?.trim().split(" ")[0] || "amigo"}</Text>
             <Text style={styles.sub}>{monthName.charAt(0).toUpperCase() + monthName.slice(1)}</Text>
-          </View>
+          </Pressable>
           <View style={styles.avatar}>
             <ShoppingBasket color="#fff" size={20} />
           </View>
@@ -212,6 +253,15 @@ export default function Dashboard() {
 }
 
 const styles = StyleSheet.create({
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", alignItems: "center", justifyContent: "center", padding: 24 },
+  modalCard: { width: "100%", maxWidth: 380, backgroundColor: "#fff", borderRadius: 20, padding: 22 },
+  modalTitle: { fontSize: 20, fontWeight: "800", color: theme.colors.onSurface },
+  modalText: { marginTop: 6, marginBottom: 14, color: theme.colors.muted },
+  modalInput: { borderWidth: 1, borderColor: "#E5E7EB", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, color: theme.colors.onSurface },
+  modalPrimary: { marginTop: 14, backgroundColor: theme.colors.brand, borderRadius: 12, paddingVertical: 13, alignItems: "center" },
+  modalPrimaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+  modalSkip: { marginTop: 6, paddingVertical: 10, alignItems: "center" },
+  modalSkipText: { color: theme.colors.muted, fontWeight: "600" },
   safe: { flex: 1, backgroundColor: theme.colors.surfaceSecondary },
   scroll: { padding: theme.spacing.lg, paddingBottom: 100 },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: theme.spacing.lg },

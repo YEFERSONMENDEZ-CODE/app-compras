@@ -1,5 +1,5 @@
 # pyright: reportPrivateImportUsage=false, reportOptionalSubscript=false
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
@@ -416,6 +416,15 @@ async def _send_password_reset_email(email: str, token: str) -> bool:
     )
     return await _send_email(email, "Restablecer contraseña de Despensa", html)
 
+async def _deliver_password_reset_email(email: str, token: str) -> None:
+    try:
+        sent = await _send_password_reset_email(email, token)
+    except Exception as exc:
+        logger.error("Password reset email crashed: %s", type(exc).__name__)
+        return
+    logger.info("Password reset email: sent=%s", sent)
+
+
 async def _issue_session(user_id: str) -> str:
     token = f"sess_{uuid.uuid4().hex}{uuid.uuid4().hex}"
     await db.user_sessions.insert_one({
@@ -665,24 +674,23 @@ async def auth_login(payload: LoginRequest):
     return SessionResponse(session_token=token, user=_user_public(user))
 
 @api_router.post("/auth/password-reset/request")
-async def request_password_reset(payload: PasswordResetRequest):
+async def request_password_reset(payload: PasswordResetRequest, background_tasks: BackgroundTasks):
     email = _norm_email(payload.email)
     user = await db.users.find_one({"email": email}, {"_id": 0})
-    if user:
-        token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
-        await db.password_reset_tokens.delete_many({"email": email})
-        await db.password_reset_tokens.insert_one({
-            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
-            "email": email,
-            "expires_at": now + timedelta(minutes=30),
-            "created_at": now,
-        })
-        sent = await _send_password_reset_email(email, token)
-        logger.info("Password reset email: account_found=True sent=%s", sent)
-    else:
-        logger.info("Password reset email: account_found=False (no existe una cuenta con ese correo)")
-    return {"message": "Si existe una cuenta con ese correo, recibirás instrucciones para restablecer la contraseña."}
+    if not user:
+        raise HTTPException(404, "No existe una cuenta con ese correo")
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    await db.password_reset_tokens.delete_many({"email": email})
+    await db.password_reset_tokens.insert_one({
+        "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+        "email": email,
+        "expires_at": now + timedelta(minutes=30),
+        "created_at": now,
+    })
+    # El envío SMTP/HTTP puede tardar varios segundos; se hace fuera de la respuesta.
+    background_tasks.add_task(_deliver_password_reset_email, email, token)
+    return {"message": "Te enviamos un enlace de recuperación. Revisa tu bandeja y la carpeta de spam."}
 
 @api_router.post("/auth/password-reset/confirm")
 async def confirm_password_reset(payload: PasswordResetConfirm):

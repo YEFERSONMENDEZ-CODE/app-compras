@@ -31,6 +31,8 @@ type AuthContextValue = {
   setUser: (u: User | null) => void;
   mode: AuthMode;
   syncError: string | null;
+  needsGuestName: boolean;
+  setGuestName: (name: string | null) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -39,9 +41,17 @@ const processedAuthCodes = new Set<string>();
 const guestUser: User = {
   user_id: "local_guest",
   email: "",
-  name: "Modo invitado",
+  name: "",
   preferred_currency: "PYG",
 };
+const GUEST_NAME_KEY = "despensa_guest_name";
+const GUEST_NAME_ASKED_KEY = "despensa_guest_name_asked";
+
+async function loadGuestProfile(): Promise<{ user: User; asked: boolean }> {
+  const name = (await storage.getItem<string>(GUEST_NAME_KEY, "")) || "";
+  const asked = !!(await storage.getItem<boolean>(GUEST_NAME_ASKED_KEY, false));
+  return { user: { ...guestUser, name }, asked: asked || !!name };
+}
 
 async function migrateLocalData(userId: string) {
   const migratedRaw = await storage.getItem<string>("despensa_migrated_users", "[]");
@@ -105,7 +115,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [googleAuthError, setGoogleAuthError] = useState<string | null>(null);
   const [mode, setMode] = useState<AuthMode>("guest");
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [guestNameAsked, setGuestNameAsked] = useState(true);
 
+  const setGuestName = useCallback(async (name: string | null) => {
+    const clean = (name || "").trim().slice(0, 40);
+    await storage.setItem(GUEST_NAME_ASKED_KEY, true);
+    if (clean) await storage.setItem(GUEST_NAME_KEY, clean);
+    setGuestNameAsked(true);
+    if (clean) setUser((current) => (current && current.user_id === guestUser.user_id ? { ...current, name: clean } : current));
+  }, []);
   const completeLogin = useCallback(async (nextUser: User) => {
     setSyncError(null);
     setMode("syncing");
@@ -158,12 +176,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setMode("authenticated");
         console.log("5. [AUTH] Usuario validado:", me.email);
       } else {
-        setUser(guestUser);
+        const guest = await loadGuestProfile();
+        setUser(guest.user);
+        setGuestNameAsked(guest.asked);
         setMode("guest");
       }
     } catch (e: any) {
       console.log("6. [AUTH] Excepción durante verificación:", e?.message || e);
-      setUser(guestUser);
+      const guest = await loadGuestProfile().catch(() => ({ user: guestUser, asked: true }));
+      setUser(guest.user);
+      setGuestNameAsked(guest.asked);
       setMode("guest");
     } finally {
       console.log("7. [AUTH] Apagando pantalla de carga (setLoading -> false)");
@@ -261,7 +283,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     try { await api("/auth/logout", { method: "POST" }); } catch {}
     await clearToken();
-    setUser(guestUser);
+    const guest = await loadGuestProfile().catch(() => ({ user: guestUser, asked: true }));
+    setUser(guest.user);
     setMode("guest");
   }, []);
 
@@ -322,6 +345,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider value={{
       user, loading, googleAuthError, signIn, signInWithEmail, registerWithEmail,
       signInWithApple, signInWithFacebook, signOut, refreshUser, setUser, mode, syncError,
+      needsGuestName: mode === "guest" && !loading && !guestNameAsked, setGuestName,
     }}>
       {children}
     </AuthContext.Provider>

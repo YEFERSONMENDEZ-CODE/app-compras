@@ -81,7 +81,7 @@ export default function LoginScreen() {
         showError("Contraseña actualizada. Ya puedes iniciar sesión.");
       } else if (mode === "forgot") {
         await api("/auth/password-reset/request", { method: "POST", body: { email: email.trim() }, auth: false });
-        showError("Si el correo existe, recibirás instrucciones para recuperar tu cuenta.");
+        showError("Te enviamos un enlace de recuperación. Revisa tu bandeja y la carpeta de spam.");
       } else if (mode === "email-register") await registerWithEmail(email.trim(), password, name.trim() || undefined);
       else await signInWithEmail(email.trim(), password);
     } catch (e: any) { showError(e.message || "Error"); }
